@@ -4,7 +4,9 @@
 export class Sim {
   constructor() {
     this.gravity = 900;       // px/s^2
-    this.compliance = 1e-5;   // обратная жёсткость (0 = абсолютно жёсткий)
+    this.compliance = 1e-5;   // обратная жёсткость рёбер (0 = абсолютно жёсткий)
+    this.areaEnabled = true;  // M2: ограничения площади треугольников
+    this.areaCompliance = 1e-5;
     this.substeps = 10;
     this.damping = 0.9995;
     this.tearEnabled = false;
@@ -25,6 +27,22 @@ export class Sim {
     this.strain = new Float32Array(0);
     this.tris = new Int32Array(0);  // тройки индексов вершин
     this.triEdges = new Int32Array(0); // тройки индексов рёбер
+    this.restArea = new Float64Array(0); // площадь покоя со знаком (знак = ориентация)
+  }
+
+  // Площадь треугольника со знаком (положительная/отрицательная — по ориентации)
+  signedArea(t) {
+    const x = this.x, a = this.tris[t * 3] * 2, b = this.tris[t * 3 + 1] * 2, c = this.tris[t * 3 + 2] * 2;
+    return 0.5 * ((x[b] - x[a]) * (x[c + 1] - x[a + 1]) - (x[c] - x[a]) * (x[b + 1] - x[a + 1]));
+  }
+
+  // Сколько треугольников «вывернулось» (знак площади сменился относительно покоя)
+  invertedCount() {
+    let k = 0;
+    for (let t = 0; t < this.restArea.length; t++) {
+      if (this.signedArea(t) * this.restArea[t] < 0) k++;
+    }
+    return k;
   }
 
   // Прямоугольная плита из nx*ny ячеек, каждая — 2 треугольника (диагонали чередуются)
@@ -67,6 +85,8 @@ export class Sim {
     this.strain = new Float32Array(m);
     this.tris = Int32Array.from(tris);
     this.triEdges = Int32Array.from(triEdges);
+    this.restArea = new Float64Array(tris.length / 3);
+    for (let t = 0; t < this.restArea.length; t++) this.restArea[t] = this.signedArea(t);
   }
 
   pick(mx, my, radius) {
@@ -108,6 +128,29 @@ export class Sim {
         dx /= len; dy /= len;
         x[a * 2] += wa * dl * dx; x[a * 2 + 1] += wa * dl * dy;
         x[b * 2] -= wb * dl * dx; x[b * 2 + 1] -= wb * dl * dy;
+      }
+      // 2б. M2: ограничения площади C = A - A0 (удерживают объём, не дают треугольнику вывернуться)
+      if (this.areaEnabled) {
+        const aAlpha = this.areaCompliance / (h * h);
+        const { tris, triEdges, restArea } = this;
+        const T = restArea.length;
+        for (let t = 0; t < T; t++) {
+          if (!alive[triEdges[t * 3]] || !alive[triEdges[t * 3 + 1]] || !alive[triEdges[t * 3 + 2]]) continue;
+          const i0 = tris[t * 3], i1 = tris[t * 3 + 1], i2 = tris[t * 3 + 2];
+          const x0 = x[i0 * 2], y0 = x[i0 * 2 + 1], x1 = x[i1 * 2], y1 = x[i1 * 2 + 1], x2 = x[i2 * 2], y2 = x[i2 * 2 + 1];
+          const C = 0.5 * ((x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)) - restArea[t];
+          // градиенты площади по вершинам
+          const g0x = 0.5 * (y1 - y2), g0y = 0.5 * (x2 - x1);
+          const g1x = 0.5 * (y2 - y0), g1y = 0.5 * (x0 - x2);
+          const g2x = 0.5 * (y0 - y1), g2y = 0.5 * (x1 - x0);
+          const w0 = w[i0], w1 = w[i1], w2 = w[i2];
+          const den = w0 * (g0x * g0x + g0y * g0y) + w1 * (g1x * g1x + g1y * g1y) + w2 * (g2x * g2x + g2y * g2y) + aAlpha;
+          if (den < 1e-12) continue;
+          const dl = -C / den;
+          x[i0 * 2] += w0 * dl * g0x; x[i0 * 2 + 1] += w0 * dl * g0y;
+          x[i1 * 2] += w1 * dl * g1x; x[i1 * 2 + 1] += w1 * dl * g1y;
+          x[i2 * 2] += w2 * dl * g2x; x[i2 * 2 + 1] += w2 * dl * g2y;
+        }
       }
       // 3. Столкновения с границами окна
       for (let i = 0; i < n; i++) {

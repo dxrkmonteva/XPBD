@@ -28,11 +28,13 @@ function build() {
 
 function applyControls() {
   sim.compliance = 1e-7 * Math.pow(10, +$('soft').value / 100 * 5); // 1e-7 .. 1e-2
+  sim.areaEnabled = $('area').checked;
+  sim.areaCompliance = 1e-7 * Math.pow(10, +$('softA').value / 100 * 5);
   sim.gravity = +$('grav').value;
   sim.tearEnabled = $('tear').checked;
   sim.tearStrain = +$('tearAt').value / 100;
 }
-['soft', 'grav', 'tear', 'tearAt'].forEach(id => $(id).addEventListener('input', applyControls));
+['soft', 'softA', 'area', 'grav', 'tear', 'tearAt'].forEach(id => $(id).addEventListener('input', applyControls));
 $('pin').addEventListener('change', build);
 $('reset').addEventListener('click', build);
 applyControls();
@@ -104,7 +106,7 @@ function frame(now) {
   last = now;
   while (acc >= DT) { sim.step(DT); acc -= DT; }
   draw();
-  $('info').textContent = `частиц: ${sim.n} · рёбер: ${sim.rest.length} · E: ${sim.energy().toFixed(0)}`;
+  $('info').textContent = `частиц: ${sim.n} · рёбер: ${sim.rest.length} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}`;
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
