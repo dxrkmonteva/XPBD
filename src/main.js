@@ -79,7 +79,10 @@ canvas.addEventListener('pointerdown', e => {
   const [mx, my] = pointer(e);
   if (knife) { stroke = { last: [mx, my], seen: new Set() }; canvas.setPointerCapture(e.pointerId); return; }
   const k = sim.pick(mx, my, 40);
-  if (k >= 0) { drag = k; dragW = sim.w[k]; sim.w[k] = 0; canvas.setPointerCapture(e.pointerId); }
+  if (k >= 0) {
+    drag = k; dragW = sim.w[k]; sim.w[k] = 0; canvas.setPointerCapture(e.pointerId);
+    dragT = [sim.x[k * 2], sim.x[k * 2 + 1]]; dragV = [0, 0];
+  }
 });
 canvas.addEventListener('pointermove', e => {
   if (stroke) {
@@ -91,10 +94,29 @@ canvas.addEventListener('pointermove', e => {
     return;
   }
   if (drag < 0) return;
-  const [mx, my] = pointer(e);
-  sim.x[drag * 2] = mx; sim.x[drag * 2 + 1] = my;
+  dragT = pointer(e); // цель; сама вершина едет к ней с ограничением скорости (см. moveDrag)
 });
-function release() { stroke = null; if (drag >= 0) { sim.w[drag] = dragW; drag = -1; } }
+
+// Вершина под пальцем едет к цели не быстрее MAX_DRAG px/с: иначе кусок «телепортируется» сквозь другой
+let dragT = null, dragV = [0, 0];
+const MAX_DRAG = 1500;
+function moveDrag(dt) {
+  if (drag < 0 || !dragT) return;
+  const dx = dragT[0] - sim.x[drag * 2], dy = dragT[1] - sim.x[drag * 2 + 1], L = Math.hypot(dx, dy);
+  if (L < 1e-6) { dragV = [0, 0]; return; }
+  const m = Math.min(L, MAX_DRAG * dt);
+  sim.x[drag * 2] += dx / L * m; sim.x[drag * 2 + 1] += dy / L * m;
+  dragV = [dx / L * m / dt, dy / L * m / dt];
+}
+// отпустили — вершина сохраняет скорость руки (можно «кинуть» кусок)
+function release() {
+  stroke = null;
+  if (drag >= 0) {
+    sim.w[drag] = dragW;
+    sim.v[drag * 2] = dragV[0]; sim.v[drag * 2 + 1] = dragV[1];
+    drag = -1;
+  }
+}
 canvas.addEventListener('pointerup', release);
 canvas.addEventListener('pointercancel', release);
 
@@ -164,7 +186,7 @@ const DT = 1 / 60;
 function frame(now) {
   acc += Math.min(0.1, (now - last) / 1000);
   last = now;
-  while (acc >= DT) { sim.step(DT); acc -= DT; }
+  while (acc >= DT) { moveDrag(DT); sim.step(DT); acc -= DT; }
   draw();
   $('info').textContent = `частиц: ${sim.n} · кусков: ${sim.pieces} · трещин: ${sim.splits} · контактов: ${sim.contacts} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
   requestAnimationFrame(frame);

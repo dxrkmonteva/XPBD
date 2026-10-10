@@ -54,6 +54,7 @@ export class Sim {
     this._cnt = null; this._pos = null;  // M5: счётчики/позиции ячеек сетки
     this._items = new Int32Array(0);     // M5: элементы по ячейкам (CSR-формат)
     this._bb = new Int32Array(0);        // M5: диапазон ячеек каждого элемента
+    this.bByPiece = new Map();           // M5.1: граничные рёбра по кускам [a, b, элемент, ...]
   }
 
   // Площадь треугольника со знаком (положительная/отрицательная — по ориентации)
@@ -308,6 +309,32 @@ export class Sim {
       if (!this.triAlive[t]) continue;
       for (let k = 0; k < 3; k++) this.vPiece[tr[t * 3 + k]] = this.pieceId[t];
     }
+    this.buildBoundary();
+  }
+
+  // M5.1: граничные рёбра каждого куска (ребро принадлежит ровно одному живому элементу).
+  // Пересобирается только при изменении топологии (после разреза).
+  buildBoundary() {
+    const T = this.triAlive.length, tr = this.tris, cap = this.cap || 1;
+    const map = new Map(); // ключ ребра → [число элементов, a, b, элемент-владелец]
+    for (let t = 0; t < T; t++) {
+      if (!this.triAlive[t]) continue;
+      for (let e = 0; e < 3; e++) {
+        const a = tr[t * 3 + e], b = tr[t * 3 + (e + 1) % 3];
+        const key = a < b ? a * cap + b : b * cap + a;
+        const r = map.get(key);
+        if (r) r[0]++; else map.set(key, [1, a, b, t]);
+      }
+    }
+    const byPiece = new Map();
+    for (const r of map.values()) {
+      if (r[0] !== 1) continue;
+      const pc = this.pieceId[r[3]];
+      let arr = byPiece.get(pc);
+      if (!arr) { arr = []; byPiece.set(pc, arr); }
+      arr.push(r[1], r[2], r[3]);
+    }
+    this.bByPiece = byPiece;
   }
 
   // ---------- M5: столкновения между кусками ----------
@@ -370,16 +397,32 @@ export class Sim {
         if (pid[t] === vp[v]) continue;      // своего куска не трогаем
         const d = this._inside(px, py, t);
         if (d < 0) continue;
-        // нормаль ближайшего ребра (наружу) и параметр s проекции на ребро
-        const e = this._edge, ia = tr[t * 3 + e], ib = tr[t * 3 + (e + 1) % 3];
-        const ax = x[ia * 2], ay = x[ia * 2 + 1], ex = x[ib * 2] - ax, ey = x[ib * 2 + 1] - ay;
-        const len = Math.hypot(ex, ey) || 1e-9, sg = this.restArea[t] > 0 ? 1 : -1;
-        const nx = sg * ey / len, ny = -sg * ex / len;           // наружу
-        const s = Math.max(0, Math.min(1, ((px - ax) * ex + (py - ay) * ey) / (len * len)));
+        // Ближайшая точка на ГРАНИЦЕ чужого куска (а не на ребре одного элемента): иначе вершина,
+        // зашедшая глубже одного элемента, «ходит» между внутренними рёбрами и не выходит (залипание).
+        const barr = this.bByPiece.get(pid[t]);
+        if (!barr) continue;
+        let ia = -1, ib = -1, s = 0, bd = Infinity, cx = 0, cy = 0, bq = 0;
+        for (let q = 0; q < barr.length; q += 3) {
+          const a0 = barr[q] * 2, b0 = barr[q + 1] * 2;
+          const ex = x[b0] - x[a0], ey = x[b0 + 1] - x[a0 + 1], l2 = ex * ex + ey * ey || 1e-12;
+          const ss = Math.max(0, Math.min(1, ((px - x[a0]) * ex + (py - x[a0 + 1]) * ey) / l2));
+          const qx = x[a0] + ss * ex, qy = x[a0 + 1] + ss * ey, dd = (px - qx) * (px - qx) + (py - qy) * (py - qy);
+          if (dd < bd) { bd = dd; ia = barr[q]; ib = barr[q + 1]; s = ss; cx = qx; cy = qy; bq = q; }
+        }
+        if (ia < 0) continue;
+        const dist = Math.sqrt(bd);
+        let nx, ny;                                              // направление выталкивания (наружу)
+        if (dist > 1e-6) { nx = (cx - px) / dist; ny = (cy - py) / dist; }
+        else {                                                   // вершина на самой границе: нормаль ребра от владельца
+          const o = barr[bq + 2], a1 = ia * 2, ex = x[ib * 2] - x[a1], ey = x[ib * 2 + 1] - x[a1 + 1], l = Math.hypot(ex, ey) || 1e-9;
+          let c3 = tr[o * 3]; if (c3 === ia || c3 === ib) c3 = tr[o * 3 + 1]; if (c3 === ia || c3 === ib) c3 = tr[o * 3 + 2];
+          nx = ey / l; ny = -ex / l;
+          if (nx * (x[c3 * 2] - x[a1]) + ny * (x[c3 * 2 + 1] - x[a1 + 1]) > 0) { nx = -nx; ny = -ny; }
+        }
         const wa = w[ia], wb = w[ib];
         const den = w[v] + (1 - s) * (1 - s) * wa + s * s * wb;
         if (den < 1e-12) continue;
-        const pen = d + skin, lam = pen / den;
+        const pen = dist + skin, lam = pen / den;
         x[v * 2] += w[v] * lam * nx; x[v * 2 + 1] += w[v] * lam * ny;
         x[ia * 2] -= wa * (1 - s) * lam * nx; x[ia * 2 + 1] -= wa * (1 - s) * lam * ny;
         x[ib * 2] -= wb * s * lam * nx; x[ib * 2 + 1] -= wb * s * lam * ny;
