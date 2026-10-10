@@ -28,13 +28,17 @@ function build() {
 
 function applyControls() {
   sim.compliance = 1e-7 * Math.pow(10, +$('soft').value / 100 * 5); // 1e-7 .. 1e-2
+  sim.femEnabled = $('fem').checked;
+  sim.young = 1e4 * Math.pow(10, +$('young').value / 100 * 4); // 1e4 .. 1e8
+  sim.nu = +$('nu').value / 100;
   sim.areaEnabled = $('area').checked;
   sim.areaCompliance = 1e-7 * Math.pow(10, +$('softA').value / 100 * 5);
   sim.gravity = +$('grav').value;
   sim.tearEnabled = $('tear').checked;
   sim.tearStrain = +$('tearAt').value / 100;
 }
-['soft', 'softA', 'area', 'grav', 'tear', 'tearAt'].forEach(id => $(id).addEventListener('input', applyControls));
+['soft', 'softA', 'area', 'young', 'nu', 'grav', 'tear', 'tearAt'].forEach(id => $(id).addEventListener('input', applyControls));
+$('fem').addEventListener('change', () => { applyControls(); build(); });
 $('pin').addEventListener('change', build);
 $('reset').addEventListener('click', build);
 applyControls();
@@ -64,22 +68,36 @@ function strainColor(s) {
   return `hsl(${hue.toFixed(0)}, 75%, ${(38 + t * 12).toFixed(0)}%)`;
 }
 
+// M3: цвет по главному напряжению, нормированному на прочность (1 = момент разрыва)
+function stressColor(r) {
+  const t = Math.pow(Math.min(1, Math.max(0, r)), 0.6);
+  return `hsl(${(210 - t * 210).toFixed(0)}, 75%, ${(38 + t * 12).toFixed(0)}%)`;
+}
+function stressPct() {
+  let mx = 0;
+  for (let t = 0; t < sim.sigma.length; t++) if (sim.sigma[t] > mx) mx = sim.sigma[t];
+  return 100 * mx / (sim.tearStrain * sim.young);
+}
+
 function draw() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, innerWidth, innerHeight);
-  const { x, tris, triEdges, alive, strain } = sim;
+  const { x, tris, triEdges, alive, strain, sigma, triAlive } = sim;
+  const crit = sim.tearStrain * sim.young;
   const T = tris.length / 3;
 
   for (let t = 0; t < T; t++) {
     const e0 = triEdges[t * 3], e1 = triEdges[t * 3 + 1], e2 = triEdges[t * 3 + 2];
-    if (!alive[e0] || !alive[e1] || !alive[e2]) continue; // наивно: треугольник с порванным ребром не рисуем
+    if (!triAlive[t] || !alive[e0] || !alive[e1] || !alive[e2]) continue; // наивно: треугольник с порванным ребром не рисуем
     const a = tris[t * 3], b = tris[t * 3 + 1], c = tris[t * 3 + 2];
     ctx.beginPath();
     ctx.moveTo(x[a * 2], x[a * 2 + 1]);
     ctx.lineTo(x[b * 2], x[b * 2 + 1]);
     ctx.lineTo(x[c * 2], x[c * 2 + 1]);
     ctx.closePath();
-    ctx.fillStyle = strainColor(Math.max(strain[e0], strain[e1], strain[e2]));
+    ctx.fillStyle = sim.femEnabled
+      ? stressColor(sigma[t] / crit)
+      : strainColor(Math.max(strain[e0], strain[e1], strain[e2]));
     ctx.fill();
     ctx.strokeStyle = 'rgba(0,0,0,0.25)';
     ctx.lineWidth = 0.6;
@@ -106,7 +124,7 @@ function frame(now) {
   last = now;
   while (acc >= DT) { sim.step(DT); acc -= DT; }
   draw();
-  $('info').textContent = `частиц: ${sim.n} · рёбер: ${sim.rest.length} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}`;
+  $('info').textContent = `частиц: ${sim.n} · рёбер: ${sim.rest.length} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
