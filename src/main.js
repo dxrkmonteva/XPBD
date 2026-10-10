@@ -29,6 +29,7 @@ function build() {
 function applyControls() {
   sim.compliance = 1e-7 * Math.pow(10, +$('soft').value / 100 * 5); // 1e-7 .. 1e-2
   sim.femEnabled = $('fem').checked;
+  sim.cutEnabled = $('cut').checked;
   sim.young = 1e4 * Math.pow(10, +$('young').value / 100 * 4); // 1e4 .. 1e8
   sim.nu = +$('nu').value / 100;
   sim.areaEnabled = $('area').checked;
@@ -37,27 +38,62 @@ function applyControls() {
   sim.tearEnabled = $('tear').checked;
   sim.tearStrain = +$('tearAt').value / 100;
 }
-['soft', 'softA', 'area', 'young', 'nu', 'grav', 'tear', 'tearAt'].forEach(id => $(id).addEventListener('input', applyControls));
+['soft', 'softA', 'area', 'young', 'nu', 'grav', 'tear', 'cut', 'tearAt'].forEach(id => $(id).addEventListener('input', applyControls));
 $('fem').addEventListener('change', () => { applyControls(); build(); });
 $('pin').addEventListener('change', build);
 $('reset').addEventListener('click', build);
 applyControls();
 build();
 
+// --- нож (M4): проведи по плите — вершины вдоль линии расщепляются перпендикулярно движению ---
+let knife = false, stroke = null;
+$('knife').addEventListener('click', () => {
+  knife = !knife;
+  $('knife').textContent = knife ? '✂ Нож: вкл' : '✂ Нож: выкл';
+  $('knife').style.borderColor = knife ? '#ff6b6b' : '';
+});
+function knifeCut(ax, ay, bx, by, seen) {
+  if (!sim.femEnabled) return;
+  const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy);
+  if (L < 1) return;
+  const nx = -dy / L, ny = dx / L, n0 = sim.n;
+  let any = false;
+  for (let i = 0; i < n0; i++) {
+    if (seen.has(i) || sim.w[i] === 0) continue;
+    const px = sim.x[i * 2], py = sim.x[i * 2 + 1];
+    const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (L * L)));
+    if (Math.hypot(px - (ax + t * dx), py - (ay + t * dy)) < 9) {
+      const nv = sim.splitVertex(i, nx, ny);
+      seen.add(i);
+      if (nv >= 0) { seen.add(nv); any = true; }
+    }
+  }
+  if (any) sim.computePieces();
+}
+
 // --- перетаскивание мышью/пальцем: вершина становится кинематической ---
 let drag = -1, dragW = 1;
 function pointer(e) { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
 canvas.addEventListener('pointerdown', e => {
   const [mx, my] = pointer(e);
+  if (knife) { stroke = { last: [mx, my], seen: new Set() }; canvas.setPointerCapture(e.pointerId); return; }
   const k = sim.pick(mx, my, 40);
   if (k >= 0) { drag = k; dragW = sim.w[k]; sim.w[k] = 0; canvas.setPointerCapture(e.pointerId); }
 });
 canvas.addEventListener('pointermove', e => {
+  if (stroke) {
+    const [mx, my] = pointer(e);
+    if (Math.hypot(mx - stroke.last[0], my - stroke.last[1]) > 6) {
+      knifeCut(stroke.last[0], stroke.last[1], mx, my, stroke.seen);
+      stroke.last = [mx, my];
+    }
+    return;
+  }
   if (drag < 0) return;
   const [mx, my] = pointer(e);
   sim.x[drag * 2] = mx; sim.x[drag * 2 + 1] = my;
 });
-function release() { if (drag >= 0) { sim.w[drag] = dragW; drag = -1; } }
+function release() { stroke = null; if (drag >= 0) { sim.w[drag] = dragW; drag = -1; } }
 canvas.addEventListener('pointerup', release);
 canvas.addEventListener('pointercancel', release);
 
@@ -99,8 +135,13 @@ function draw() {
       ? stressColor(sigma[t] / crit)
       : strainColor(Math.max(strain[e0], strain[e1], strain[e2]));
     ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
-    ctx.lineWidth = 0.6;
+    if (sim.pieces > 1 && sim.femEnabled) {
+      ctx.strokeStyle = `hsla(${(sim.pieceId[t] * 47) % 360}, 70%, 72%, 0.6)`; // каждый кусок — свой оттенок рёбер
+      ctx.lineWidth = 0.9;
+    } else {
+      ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+      ctx.lineWidth = 0.6;
+    }
     ctx.stroke();
   }
 
@@ -124,7 +165,7 @@ function frame(now) {
   last = now;
   while (acc >= DT) { sim.step(DT); acc -= DT; }
   draw();
-  $('info').textContent = `частиц: ${sim.n} · рёбер: ${sim.rest.length} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
+  $('info').textContent = `частиц: ${sim.n} · кусков: ${sim.pieces} · трещин: ${sim.splits} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

@@ -10,6 +10,9 @@ export class Sim {
     this.femEnabled = true;   // M3: коротационный FEM вместо рёбер + площади
     this.young = 1e5;         // модуль Юнга E
     this.nu = 0.3;            // коэффициент Пуассона ν
+    this.cutEnabled = true;   // M4: трещины = расщепление вершин (иначе эрозия элементов)
+    this.maxSplits = 2;       // максимум расщеплений за кадр (трещина растёт плавно)
+    this.splits = 0;          // счётчик расщеплений
     this.substeps = 10;
     this.damping = 0.9995;
     this.tearEnabled = false;
@@ -36,6 +39,13 @@ export class Sim {
     this.triAlive = new Uint8Array(0);   // M3: жив ли элемент (эрозия при разрыве)
     this.sigma = new Float32Array(0);    // M3: макс. главное напряжение Коши на элементе
     this._f = new Float64Array(8);       // рабочий буфер
+    this.cap = 0;                        // M4: ёмкость массивов вершин (n растёт при расщеплении)
+    this.sxx = new Float32Array(0);      // M4: тензор напряжения элемента (мировые координаты)
+    this.sxy = new Float32Array(0);
+    this.syy = new Float32Array(0);
+    this.pieceId = new Int32Array(0);    // M4: номер куска для каждого элемента
+    this.pieces = 0;                     // M4: число отдельных кусков
+    this._acc = new Float64Array(0);
   }
 
   // Площадь треугольника со знаком (положительная/отрицательная — по ориентации)
@@ -58,8 +68,10 @@ export class Sim {
     this.clear();
     const cols = nx + 1, rows = ny + 1, n = cols * rows;
     this.n = n;
-    this.x = new Float64Array(n * 2); this.p = new Float64Array(n * 2);
-    this.v = new Float64Array(n * 2); this.w = new Float64Array(n).fill(1);
+    const cap = n * 3;  // запас под вершины, которые появятся при расщеплении
+    this.cap = cap;
+    this.x = new Float64Array(cap * 2); this.p = new Float64Array(cap * 2);
+    this.v = new Float64Array(cap * 2); this.w = new Float64Array(cap).fill(1);
     for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
       const k = j * cols + i;
       this.x[k * 2] = this.p[k * 2] = ox + i * spacing;
@@ -110,6 +122,10 @@ export class Sim {
       this.dmInv.set([d / det, -b / det, -c / det, a / det], t * 4);
       this.vol[t] = Math.abs(det) / 2;
     }
+    this.sxx = new Float32Array(T); this.sxy = new Float32Array(T); this.syy = new Float32Array(T);
+    this._acc = new Float64Array(cap * 4);
+    this.splits = 0;
+    this.computePieces();
   }
 
   // ---------- M3: коротационный FEM (XPBD) ----------
@@ -188,8 +204,94 @@ export class Sim {
       const sig2 = (2 * mu * (s2 - 1) + lam * trE) / Math.max(s1, 0.1);
       const sm = Math.max(sig1, sig2);
       sigma[t] = sm;
-      if (this.tearEnabled && sm > crit) alive[t] = 0;
+      // тензор напряжения в мировых осях: σ = σ1 w1w1ᵀ + σ2 w2w2ᵀ, w = R·v (v — оси S)
+      const phi = 0.5 * Math.atan2(2 * s01, S00 - S11), cp = Math.cos(phi), sp = Math.sin(phi);
+      const w1x = cs * cp - sn * sp, w1y = sn * cp + cs * sp;
+      const w2x = -(cs * sp + sn * cp), w2y = -sn * sp + cs * cp;
+      this.sxx[t] = sig1 * w1x * w1x + sig2 * w2x * w2x;
+      this.sxy[t] = sig1 * w1x * w1y + sig2 * w2x * w2y;
+      this.syy[t] = sig1 * w1y * w1y + sig2 * w2y * w2y;
+      if (this.tearEnabled && !this.cutEnabled && sm > crit) alive[t] = 0; // M3: эрозия
     }
+    if (this.tearEnabled && this.cutEnabled) this.cutStep(crit);
+  }
+
+  // ---------- M4: разрез сетки ----------
+  // Расщепить вершину v плоскостью, перпендикулярной (nx, ny): элементы «впереди» (вдоль n)
+  // остаются на v, элементы «позади» получают дубликат вершины. Возвращает индекс новой вершины или -1.
+  splitVertex(v, nx, ny) {
+    if (this.n >= this.cap || this.w[v] === 0) return -1;
+    const tr = this.tris, x = this.x, T = this.triAlive.length;
+    const back = [];
+    let front = 0;
+    for (let t = 0; t < T; t++) {
+      if (!this.triAlive[t]) continue;
+      const k = tr[t * 3] === v ? 0 : tr[t * 3 + 1] === v ? 1 : tr[t * 3 + 2] === v ? 2 : -1;
+      if (k < 0) continue;
+      const cx = (x[tr[t * 3] * 2] + x[tr[t * 3 + 1] * 2] + x[tr[t * 3 + 2] * 2]) / 3 - x[v * 2];
+      const cy = (x[tr[t * 3] * 2 + 1] + x[tr[t * 3 + 1] * 2 + 1] + x[tr[t * 3 + 2] * 2 + 1]) / 3 - x[v * 2 + 1];
+      if (cx * nx + cy * ny < 0) back.push(t * 3 + k); else front++;
+    }
+    if (!back.length || !front) return -1; // трещине нужны элементы с обеих сторон
+    const nv = this.n++;
+    this.x[nv * 2] = this.p[nv * 2] = x[v * 2];
+    this.x[nv * 2 + 1] = this.p[nv * 2 + 1] = x[v * 2 + 1];
+    this.v[nv * 2] = this.v[v * 2]; this.v[nv * 2 + 1] = this.v[v * 2 + 1];
+    this.w[nv] = this.w[v];
+    for (const slot of back) tr[slot] = nv;
+    return nv;
+  }
+
+  // Узловое напряжение = среднее по площади тензоров соседних элементов.
+  // Вершина с главным напряжением > прочности расщепляется перпендикулярно главному направлению.
+  cutStep(crit) {
+    const n = this.n, T = this.triAlive.length, tr = this.tris, acc = this._acc;
+    acc.fill(0, 0, n * 4);
+    for (let t = 0; t < T; t++) {
+      if (!this.triAlive[t]) continue;
+      const area = Math.abs(this.signedArea(t));
+      for (let k = 0; k < 3; k++) {
+        const o = tr[t * 3 + k] * 4;
+        acc[o] += area * this.sxx[t]; acc[o + 1] += area * this.sxy[t];
+        acc[o + 2] += area * this.syy[t]; acc[o + 3] += area;
+      }
+    }
+    const cand = [];
+    for (let v = 0; v < n; v++) {
+      const A = acc[v * 4 + 3];
+      if (A <= 0 || this.w[v] === 0) continue;
+      const a = acc[v * 4] / A, b = acc[v * 4 + 1] / A, c = acc[v * 4 + 2] / A;
+      const lam = (a + c) / 2 + Math.hypot((a - c) / 2, b);
+      if (lam > crit) { const psi = 0.5 * Math.atan2(2 * b, a - c); cand.push([lam, v, Math.cos(psi), Math.sin(psi)]); }
+    }
+    if (!cand.length) return;
+    cand.sort((p, q) => q[0] - p[0]);
+    let did = 0;
+    for (const [, v, nx, ny] of cand) {
+      if (did >= this.maxSplits) break;
+      if (this.splitVertex(v, nx, ny) >= 0) did++;
+    }
+    if (did) { this.splits += did; this.computePieces(); }
+  }
+
+  // Связные компоненты: элементы, делящие вершину, принадлежат одному куску (union-find)
+  computePieces() {
+    const T = this.triAlive.length, tr = this.tris, parent = new Int32Array(this.n);
+    for (let i = 0; i < this.n; i++) parent[i] = i;
+    const find = a => { while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+    for (let t = 0; t < T; t++) {
+      if (!this.triAlive[t]) continue;
+      const r0 = find(tr[t * 3]), r1 = find(tr[t * 3 + 1]), r2 = find(tr[t * 3 + 2]);
+      parent[r1] = r0; parent[find(r2)] = find(r0);
+    }
+    const roots = new Set();
+    if (this.pieceId.length !== T) this.pieceId = new Int32Array(T);
+    for (let t = 0; t < T; t++) {
+      if (!this.triAlive[t]) { this.pieceId[t] = -1; continue; }
+      const r = find(tr[t * 3]);
+      this.pieceId[t] = r; roots.add(r);
+    }
+    this.pieces = roots.size;
   }
 
   pick(mx, my, radius) {
