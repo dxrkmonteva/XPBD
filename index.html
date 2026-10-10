@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <title>XPBD Fracture Sim — M3</title>
+  <title>XPBD Fracture Sim — M4</title>
   <style>
     html, body { margin: 0; height: 100%; background: #0b0e14; color: #e6edf6; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; overflow: hidden; }
     canvas { display: block; touch-action: none; }
@@ -25,7 +25,9 @@
     <label><input id="area" type="checkbox" checked> Площадь (только M2)</label>
     <label>Мягкость площади <input id="softA" type="range" min="0" max="100" value="40"></label>
     <label><input id="pin" type="checkbox"> Закрепить левый край</label>
-    <label><input id="tear" type="checkbox"> Рвать рёбра</label>
+    <label><input id="tear" type="checkbox"> Рвать</label>
+    <label><input id="cut" type="checkbox" checked> Трещины (M4)</label>
+    <button id="knife">✂ Нож: выкл</button>
     <label>Порог разрыва <input id="tearAt" type="range" min="10" max="150" value="45"></label>
     <button id="reset">Сброс</button>
     <span id="info"></span>
