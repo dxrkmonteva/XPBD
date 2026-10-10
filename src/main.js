@@ -30,6 +30,7 @@ function applyControls() {
   sim.compliance = 1e-7 * Math.pow(10, +$('soft').value / 100 * 5); // 1e-7 .. 1e-2
   sim.femEnabled = $('fem').checked;
   sim.cutEnabled = $('cut').checked;
+  sim.collideEnabled = $('collide').checked;
   sim.young = 1e4 * Math.pow(10, +$('young').value / 100 * 4); // 1e4 .. 1e8
   sim.nu = +$('nu').value / 100;
   sim.areaEnabled = $('area').checked;
@@ -38,7 +39,7 @@ function applyControls() {
   sim.tearEnabled = $('tear').checked;
   sim.tearStrain = +$('tearAt').value / 100;
 }
-['soft', 'softA', 'area', 'young', 'nu', 'grav', 'tear', 'cut', 'tearAt'].forEach(id => $(id).addEventListener('input', applyControls));
+['soft', 'softA', 'area', 'young', 'nu', 'grav', 'tear', 'cut', 'collide', 'tearAt'].forEach(id => $(id).addEventListener('input', applyControls));
 $('fem').addEventListener('change', () => { applyControls(); build(); });
 $('pin').addEventListener('change', build);
 $('reset').addEventListener('click', build);
@@ -165,7 +166,7 @@ function frame(now) {
   last = now;
   while (acc >= DT) { sim.step(DT); acc -= DT; }
   draw();
-  $('info').textContent = `частиц: ${sim.n} · кусков: ${sim.pieces} · трещин: ${sim.splits} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
+  $('info').textContent = `частиц: ${sim.n} · кусков: ${sim.pieces} · трещин: ${sim.splits} · контактов: ${sim.contacts} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

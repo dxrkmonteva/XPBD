@@ -13,6 +13,10 @@ export class Sim {
     this.cutEnabled = true;   // M4: трещины = расщепление вершин (иначе эрозия элементов)
     this.maxSplits = 2;       // максимум расщеплений за кадр (трещина растёт плавно)
     this.splits = 0;          // счётчик расщеплений
+    this.collideEnabled = true; // M5: столкновения между кусками (пространственная сетка)
+    this.friction = 0.4;      // M5: коэффициент трения Кулона между кусками
+    this.cellSize = 32;       // M5: размер ячейки пространственной сетки
+    this.contacts = 0;        // M5: число контактов в последнем подшаге
     this.substeps = 10;
     this.damping = 0.9995;
     this.tearEnabled = false;
@@ -46,6 +50,10 @@ export class Sim {
     this.pieceId = new Int32Array(0);    // M4: номер куска для каждого элемента
     this.pieces = 0;                     // M4: число отдельных кусков
     this._acc = new Float64Array(0);
+    this.vPiece = new Int32Array(0);     // M5: номер куска вершины (-1 — вершина без элементов)
+    this._cnt = null; this._pos = null;  // M5: счётчики/позиции ячеек сетки
+    this._items = new Int32Array(0);     // M5: элементы по ячейкам (CSR-формат)
+    this._bb = new Int32Array(0);        // M5: диапазон ячеек каждого элемента
   }
 
   // Площадь треугольника со знаком (положительная/отрицательная — по ориентации)
@@ -124,6 +132,7 @@ export class Sim {
     }
     this.sxx = new Float32Array(T); this.sxy = new Float32Array(T); this.syy = new Float32Array(T);
     this._acc = new Float64Array(cap * 4);
+    this.cellSize = spacing * 2.2;
     this.splits = 0;
     this.computePieces();
   }
@@ -292,6 +301,114 @@ export class Sim {
       this.pieceId[t] = r; roots.add(r);
     }
     this.pieces = roots.size;
+    // M5: кусок каждой вершины (по любому её элементу)
+    if (this.vPiece.length !== this.cap) this.vPiece = new Int32Array(this.cap);
+    this.vPiece.fill(-1);
+    for (let t = 0; t < T; t++) {
+      if (!this.triAlive[t]) continue;
+      for (let k = 0; k < 3; k++) this.vPiece[tr[t * 3 + k]] = this.pieceId[t];
+    }
+  }
+
+  // ---------- M5: столкновения между кусками ----------
+  // Расстояние от точки (px,py) до границы элемента t, если точка строго внутри, иначе -1.
+  // Возвращает минимальное расстояние до трёх рёбер; индекс ближайшего ребра кладёт в this._edge.
+  _inside(px, py, t) {
+    const x = this.x, tr = this.tris;
+    const s = this.restArea[t] > 0 ? 1 : -1;
+    if (this.signedArea(t) * this.restArea[t] <= 0) return -1; // вывернутый элемент не участвует
+    let best = Infinity, be = -1;
+    for (let e = 0; e < 3; e++) {
+      const a = tr[t * 3 + e] * 2, b = tr[t * 3 + (e + 1) % 3] * 2;
+      const ex = x[b] - x[a], ey = x[b + 1] - x[a + 1], len = Math.hypot(ex, ey) || 1e-9;
+      const d = s * (ex * (py - x[a + 1]) - ey * (px - x[a])) / len; // > 0 — внутри
+      if (d < best) { best = d; be = e; }
+      if (d <= 1e-4) return -1;
+    }
+    this._edge = be;
+    return best;
+  }
+
+  // Широкая фаза: пространственная сетка (счётная сортировка элементов по ячейкам).
+  // Узкая фаза: вершина внутри элемента ЧУЖОГО куска → выталкиваем по нормали ближайшего ребра (XPBD-контакт).
+  collide() {
+    const T = this.triAlive.length, tr = this.tris, x = this.x, w = this.w, p = this.p, alive = this.triAlive;
+    const cs = this.cellSize, gw = Math.ceil(this.bounds.w / cs) + 2, gh = Math.ceil(this.bounds.h / cs) + 2, G = gw * gh;
+    if (!this._cnt || this._cnt.length !== G + 1) { this._cnt = new Int32Array(G + 1); this._pos = new Int32Array(G); }
+    if (this._bb.length !== T * 4) this._bb = new Int32Array(T * 4);
+    const cnt = this._cnt, pos = this._pos, bb = this._bb;
+    const cl = (v, hi) => v < 0 ? 0 : v > hi ? hi : v;
+    cnt.fill(0);
+    for (let t = 0; t < T; t++) {
+      if (!alive[t]) { bb[t * 4] = 1; bb[t * 4 + 2] = 0; continue; } // пустой диапазон
+      const a = tr[t * 3] * 2, b = tr[t * 3 + 1] * 2, c = tr[t * 3 + 2] * 2;
+      const x0 = Math.min(x[a], x[b], x[c]) - 1, x1 = Math.max(x[a], x[b], x[c]) + 1;
+      const y0 = Math.min(x[a + 1], x[b + 1], x[c + 1]) - 1, y1 = Math.max(x[a + 1], x[b + 1], x[c + 1]) + 1;
+      const ix0 = cl(Math.floor(x0 / cs), gw - 1), ix1 = cl(Math.floor(x1 / cs), gw - 1);
+      const iy0 = cl(Math.floor(y0 / cs), gh - 1), iy1 = cl(Math.floor(y1 / cs), gh - 1);
+      bb[t * 4] = ix0; bb[t * 4 + 1] = iy0; bb[t * 4 + 2] = ix1; bb[t * 4 + 3] = iy1;
+      for (let iy = iy0; iy <= iy1; iy++) for (let ix = ix0; ix <= ix1; ix++) cnt[iy * gw + ix + 1]++;
+    }
+    for (let c = 1; c <= G; c++) cnt[c] += cnt[c - 1];
+    if (this._items.length < cnt[G]) this._items = new Int32Array(cnt[G] * 2);
+    const items = this._items;
+    for (let c = 0; c < G; c++) pos[c] = cnt[c];
+    for (let t = 0; t < T; t++) {
+      if (!alive[t]) continue;
+      for (let iy = bb[t * 4 + 1]; iy <= bb[t * 4 + 3]; iy++)
+        for (let ix = bb[t * 4]; ix <= bb[t * 4 + 2]; ix++) items[pos[iy * gw + ix]++] = t;
+    }
+
+    let contacts = 0;
+    const skin = 0.02, mu = this.friction, pid = this.pieceId, vp = this.vPiece;
+    for (let v = 0; v < this.n; v++) {
+      if (vp[v] < 0 || w[v] === 0) continue; // неподвижные вершины сами не двигаем (но элементы с ними участвуют)
+      const px = x[v * 2], py = x[v * 2 + 1];
+      const cell = cl(Math.floor(py / cs), gh - 1) * gw + cl(Math.floor(px / cs), gw - 1);
+      for (let k = cnt[cell]; k < cnt[cell + 1]; k++) {
+        const t = items[k];
+        if (pid[t] === vp[v]) continue;      // своего куска не трогаем
+        const d = this._inside(px, py, t);
+        if (d < 0) continue;
+        // нормаль ближайшего ребра (наружу) и параметр s проекции на ребро
+        const e = this._edge, ia = tr[t * 3 + e], ib = tr[t * 3 + (e + 1) % 3];
+        const ax = x[ia * 2], ay = x[ia * 2 + 1], ex = x[ib * 2] - ax, ey = x[ib * 2 + 1] - ay;
+        const len = Math.hypot(ex, ey) || 1e-9, sg = this.restArea[t] > 0 ? 1 : -1;
+        const nx = sg * ey / len, ny = -sg * ex / len;           // наружу
+        const s = Math.max(0, Math.min(1, ((px - ax) * ex + (py - ay) * ey) / (len * len)));
+        const wa = w[ia], wb = w[ib];
+        const den = w[v] + (1 - s) * (1 - s) * wa + s * s * wb;
+        if (den < 1e-12) continue;
+        const pen = d + skin, lam = pen / den;
+        x[v * 2] += w[v] * lam * nx; x[v * 2 + 1] += w[v] * lam * ny;
+        x[ia * 2] -= wa * (1 - s) * lam * nx; x[ia * 2 + 1] -= wa * (1 - s) * lam * ny;
+        x[ib * 2] -= wb * s * lam * nx; x[ib * 2 + 1] -= wb * s * lam * ny;
+        // трение: гасим относительное касательное смещение за подшаг (в пределах μ·pen)
+        const rx = (x[v * 2] - p[v * 2]) - ((1 - s) * (x[ia * 2] - p[ia * 2]) + s * (x[ib * 2] - p[ib * 2]));
+        const ry = (x[v * 2 + 1] - p[v * 2 + 1]) - ((1 - s) * (x[ia * 2 + 1] - p[ia * 2 + 1]) + s * (x[ib * 2 + 1] - p[ib * 2 + 1]));
+        const tx = -ny, ty = nx, rt = rx * tx + ry * ty;
+        const ft = Math.max(-mu * pen, Math.min(mu * pen, rt)), lt = ft / den;
+        x[v * 2] -= w[v] * lt * tx; x[v * 2 + 1] -= w[v] * lt * ty;
+        x[ia * 2] += wa * (1 - s) * lt * tx; x[ia * 2 + 1] += wa * (1 - s) * lt * ty;
+        x[ib * 2] += wb * s * lt * tx; x[ib * 2 + 1] += wb * s * lt * ty;
+        contacts++;
+        break; // вершина вытолкнута из элемента — к следующей вершине
+      }
+    }
+    this.contacts = contacts;
+  }
+
+  // Диагностика: сколько вершин сейчас глубже 0.1 px внутри элементов чужого куска (полный перебор)
+  penetrationCount() {
+    let k = 0;
+    for (let v = 0; v < this.n; v++) {
+      if (this.vPiece[v] < 0) continue;
+      for (let t = 0; t < this.triAlive.length; t++) {
+        if (!this.triAlive[t] || this.pieceId[t] === this.vPiece[v]) continue;
+        if (this._inside(this.x[v * 2], this.x[v * 2 + 1], t) > 0.1) { k++; break; }
+      }
+    }
+    return k;
   }
 
   pick(mx, my, radius) {
@@ -359,6 +476,8 @@ export class Sim {
           x[i2 * 2] += w2 * dl * g2x; x[i2 * 2 + 1] += w2 * dl * g2y;
         }
       }
+      // 2в. M5: столкновения между кусками
+      if (fem && this.collideEnabled && this.pieces > 1) this.collide();
       // 3. Столкновения с границами окна
       for (let i = 0; i < n; i++) {
         if (w[i] === 0) continue;
