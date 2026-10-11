@@ -11,25 +11,27 @@
     #hud label { display: flex; align-items: center; gap: 6px; }
     #hud input[type=range] { width: 110px; accent-color: #6cb8ff; }
     #hud button { background: #1b2636; color: inherit; border: 1px solid #33465f; border-radius: 8px; padding: 6px 12px; }
+    #hud .val { min-width: 4.6em; color: #9fd0ff; font-variant-numeric: tabular-nums; }
+    #hud .val i { font-style: normal; font-weight: 400; opacity: .65; }
     #info { opacity: .7; font-variant-numeric: tabular-nums; }
   </style>
 </head>
 <body>
   <canvas id="c"></canvas>
   <div id="hud">
-    <label>Мягкость <input id="soft" type="range" min="0" max="100" value="40"></label>
-    <label>Гравитация <input id="grav" type="range" min="0" max="2000" value="900"></label>
+    <label>Мягкость <input id="soft" type="range" min="0" max="100" value="40"> <b class="val" id="v-soft"></b></label>
+    <label>Гравитация <input id="grav" type="range" min="0" max="2000" value="900"> <b class="val" id="v-grav"></b></label>
     <label><input id="fem" type="checkbox" checked> FEM (M3)</label>
-    <label>Жёсткость E <input id="young" type="range" min="0" max="100" value="25"></label>
-    <label>ν <input id="nu" type="range" min="0" max="45" value="30"></label>
+    <label>Жёсткость E <input id="young" type="range" min="0" max="100" value="25"> <b class="val" id="v-young"></b></label>
+    <label>ν <input id="nu" type="range" min="0" max="45" value="30"> <b class="val" id="v-nu"></b></label>
     <label><input id="area" type="checkbox" checked> Площадь (только M2)</label>
-    <label>Мягкость площади <input id="softA" type="range" min="0" max="100" value="40"></label>
+    <label>Мягкость площади <input id="softA" type="range" min="0" max="100" value="40"> <b class="val" id="v-softA"></b></label>
     <label><input id="pin" type="checkbox"> Закрепить левый край</label>
     <label><input id="tear" type="checkbox"> Рвать</label>
     <label><input id="cut" type="checkbox" checked> Трещины (M4)</label>
     <label><input id="collide" type="checkbox" checked> Столкновения кусков (M5)</label>
     <button id="knife">✂ Нож: выкл</button>
-    <label>Порог разрыва <input id="tearAt" type="range" min="10" max="150" value="45"></label>
+    <label>Порог разрыва <input id="tearAt" type="range" min="10" max="150" value="45"> <b class="val" id="v-tearAt"></b></label>
     <button id="reset">Сброс</button>
     <span id="info"></span>
   </div>
