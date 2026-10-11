@@ -134,6 +134,7 @@ export class Sim {
     this.sxx = new Float32Array(T); this.sxy = new Float32Array(T); this.syy = new Float32Array(T);
     this._acc = new Float64Array(cap * 4);
     this.cellSize = spacing * 2.2;
+    this.spacing = spacing;
     this.splits = 0;
     this.computePieces();
   }
@@ -250,6 +251,68 @@ export class Sim {
     this.w[nv] = this.w[v];
     for (const slot of back) tr[slot] = nv;
     return nv;
+  }
+
+  // M4.1: разрез вдоль нарисованной линии (нож).
+  // pts = [x0, y0, x1, y1, ...] — ломаная; R — полуширина зоны разреза (≈ 3.5 шага сетки).
+  // 1) Каждая вершина рядом с линией получает знак стороны (слева +1 / справа −1) относительно ближайшего
+  //    звена ломаной. Вершины за концами линии знака не получают — там остаётся кончик трещины.
+  // 2) Элемент, у которого все 3 вершины имеют знак, получает метку по большинству знаков (2 из 3 —
+  //    результат однозначен, без «полосок» и зависимости от угла линии).
+  // 3) Вершина, у которой есть элементы обеих меток, расщепляется: «−»-элементы переезжают на копию.
+  // Возвращает число расщеплённых вершин.
+  cutAlong(pts, R) {
+    const nSeg = pts.length / 2 - 1;
+    if (nSeg < 1) return 0;
+    const n0 = this.n, T = this.triAlive.length, tr = this.tris, x = this.x;
+    const sgn = new Int8Array(n0);
+    for (let v = 0; v < n0; v++) {
+      const px = x[v * 2], py = x[v * 2 + 1];
+      let best = Infinity, side = 0, endClamp = false;
+      for (let s = 0; s < nSeg; s++) {
+        const ax = pts[s * 2], ay = pts[s * 2 + 1], dx = pts[s * 2 + 2] - ax, dy = pts[s * 2 + 3] - ay;
+        const l2 = dx * dx + dy * dy;
+        if (l2 < 1e-9) continue;
+        const u = ((px - ax) * dx + (py - ay) * dy) / l2;
+        const c = u < 0 ? 0 : u > 1 ? 1 : u;
+        const qx = ax + c * dx - px, qy = ay + c * dy - py, d2 = qx * qx + qy * qy;
+        if (d2 < best) {
+          best = d2;
+          side = (dx * (py - ay) - dy * (px - ax)) >= 0 ? 1 : -1;
+          endClamp = (s === 0 && u < 0) || (s === nSeg - 1 && u > 1);
+        }
+      }
+      if (best <= R * R && !endClamp) sgn[v] = side;
+    }
+    const lab = new Int8Array(T);
+    for (let t = 0; t < T; t++) {
+      if (!this.triAlive[t]) continue;
+      const a = sgn[tr[t * 3]], b = sgn[tr[t * 3 + 1]], c = sgn[tr[t * 3 + 2]];
+      if (a && b && c) lab[t] = a + b + c > 0 ? 1 : -1;
+    }
+    // слоты (элемент*3+угол) каждой вершины по меткам
+    const minus = new Map(), plus = new Set();
+    for (let t = 0; t < T; t++) {
+      if (!lab[t]) continue;
+      for (let k = 0; k < 3; k++) {
+        const v = tr[t * 3 + k];
+        if (lab[t] > 0) plus.add(v);
+        else { let arr = minus.get(v); if (!arr) { arr = []; minus.set(v, arr); } arr.push(t * 3 + k); }
+      }
+    }
+    let done = 0;
+    for (const [v, slots] of minus) {
+      if (!plus.has(v) || this.w[v] === 0 || this.n >= this.cap) continue; // нет «+» элементов / закреплена / нет места
+      const nv = this.n++;
+      this.x[nv * 2] = this.p[nv * 2] = this.x[v * 2];
+      this.x[nv * 2 + 1] = this.p[nv * 2 + 1] = this.x[v * 2 + 1];
+      this.v[nv * 2] = this.v[v * 2]; this.v[nv * 2 + 1] = this.v[v * 2 + 1];
+      this.w[nv] = this.w[v];
+      for (const slot of slots) tr[slot] = nv;
+      done++;
+    }
+    if (done) this.computePieces(); // счётчик «трещин» нож не трогает: он считает только самовольные трещины
+    return done;
   }
 
   // Узловое напряжение = среднее по площади тензоров соседних элементов.

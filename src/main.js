@@ -62,30 +62,20 @@ $('reset').addEventListener('click', build);
 applyControls();
 build();
 
-// --- нож (M4): проведи по плите — вершины вдоль линии расщепляются перпендикулярно движению ---
+// --- нож (M4.1): проведи линию по плите и отпусти — плита разрежется вдоль неё ---
 let knife = false, stroke = null;
 $('knife').addEventListener('click', () => {
   knife = !knife;
   $('knife').textContent = knife ? '✂ Нож: вкл' : '✂ Нож: выкл';
   $('knife').style.borderColor = knife ? '#ff6b6b' : '';
 });
-function knifeCut(ax, ay, bx, by, seen) {
-  if (!sim.femEnabled) return;
-  const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy);
-  if (L < 1) return;
-  const nx = -dy / L, ny = dx / L, n0 = sim.n;
-  let any = false;
-  for (let i = 0; i < n0; i++) {
-    if (seen.has(i) || sim.w[i] === 0) continue;
-    const px = sim.x[i * 2], py = sim.x[i * 2 + 1];
-    const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (L * L)));
-    if (Math.hypot(px - (ax + t * dx), py - (ay + t * dy)) < 9) {
-      const nv = sim.splitVertex(i, nx, ny);
-      seen.add(i);
-      if (nv >= 0) { seen.add(nv); any = true; }
-    }
-  }
-  if (any) sim.computePieces();
+// M4.1: нож рисует линию (красный след), разрез делается при отпускании пальца/кнопки:
+// вершины делятся по стороне от линии, любой угол и изгиб, без «полосок» (см. sim.cutAlong)
+function endStroke(doCut) {
+  const s = stroke; stroke = null;
+  if (!s || !doCut || !sim.femEnabled || s.pts.length < 4) return;
+  const L = s.pts.reduce((a, _, i) => i >= 2 && i % 2 === 0 ? a + Math.hypot(s.pts[i] - s.pts[i - 2], s.pts[i + 1] - s.pts[i - 1]) : a, 0);
+  if (L >= 10) sim.cutAlong(s.pts, 3.5 * sim.spacing);
 }
 
 // --- перетаскивание мышью/пальцем: вершина становится кинематической ---
@@ -93,7 +83,7 @@ let drag = -1, dragW = 1;
 function pointer(e) { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
 canvas.addEventListener('pointerdown', e => {
   const [mx, my] = pointer(e);
-  if (knife) { stroke = { last: [mx, my], seen: new Set() }; canvas.setPointerCapture(e.pointerId); return; }
+  if (knife) { stroke = { pts: [mx, my] }; canvas.setPointerCapture(e.pointerId); return; }
   const k = sim.pick(mx, my, 40);
   if (k >= 0) {
     drag = k; dragW = sim.w[k]; sim.w[k] = 0; canvas.setPointerCapture(e.pointerId);
@@ -103,10 +93,8 @@ canvas.addEventListener('pointerdown', e => {
 canvas.addEventListener('pointermove', e => {
   if (stroke) {
     const [mx, my] = pointer(e);
-    if (Math.hypot(mx - stroke.last[0], my - stroke.last[1]) > 6) {
-      knifeCut(stroke.last[0], stroke.last[1], mx, my, stroke.seen);
-      stroke.last = [mx, my];
-    }
+    const p = stroke.pts, n = p.length;
+    if (Math.hypot(mx - p[n - 2], my - p[n - 1]) >= 4) p.push(mx, my);
     return;
   }
   if (drag < 0) return;
@@ -125,8 +113,8 @@ function moveDrag(dt) {
   dragV = [dx / L * m / dt, dy / L * m / dt];
 }
 // отпустили — вершина сохраняет скорость руки (можно «кинуть» кусок)
-function release() {
-  stroke = null;
+function release(e) {
+  endStroke(!(e && e.type === 'pointercancel'));
   if (drag >= 0) {
     sim.w[drag] = dragW;
     sim.v[drag * 2] = dragV[0]; sim.v[drag * 2 + 1] = dragV[1];
@@ -182,6 +170,15 @@ function draw() {
       ctx.lineWidth = 0.6;
     }
     ctx.stroke();
+  }
+
+  // след ножа
+  if (stroke && stroke.pts.length >= 4) {
+    ctx.strokeStyle = '#ff6b6b'; ctx.lineWidth = 2.5; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.setLineDash([7, 5]);
+    ctx.beginPath(); ctx.moveTo(stroke.pts[0], stroke.pts[1]);
+    for (let i = 2; i < stroke.pts.length; i += 2) ctx.lineTo(stroke.pts[i], stroke.pts[i + 1]);
+    ctx.stroke(); ctx.setLineDash([]);
   }
 
   // пол
