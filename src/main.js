@@ -23,7 +23,9 @@ function build() {
   const nx = Math.min(26, Math.floor((innerWidth - 80) / spacing));
   const ny = 8;
   const ox = Math.max(20, (innerWidth - nx * spacing) / 2);
-  sim.buildSlab(nx, ny, spacing, ox, 140, $('pin').checked);
+  // плита стартует ниже панели управления (на телефоне панель занимает несколько строк)
+  const oy = Math.max(140, Math.ceil($('hud').getBoundingClientRect().bottom) + 20);
+  sim.buildSlab(nx, ny, spacing, ox, oy, $('pin').checked);
 }
 
 function applyControls() {
@@ -38,6 +40,20 @@ function applyControls() {
   sim.gravity = +$('grav').value;
   sim.tearEnabled = $('tear').checked;
   sim.tearStrain = +$('tearAt').value / 100;
+  showValues();
+}
+
+// Числа рядом с ползунками: крупно — положение ползунка (его называют в инструкциях),
+// бледно в скобках — реальное значение в физических единицах.
+const sci = v => v.toExponential(1).replace('.0e', 'e').replace('e+', 'e');
+function showValues() {
+  const set = (id, pos, phys) => { $('v-' + id).innerHTML = phys ? `${pos} <i>(${phys})</i>` : pos; };
+  set('soft', $('soft').value, sci(sim.compliance));
+  set('softA', $('softA').value, sci(sim.areaCompliance));
+  set('young', $('young').value, sci(sim.young));
+  set('nu', $('nu').value, sim.nu.toFixed(2));
+  set('grav', $('grav').value);
+  set('tearAt', $('tearAt').value, sim.femEnabled ? '% от E' : '% удл.');
 }
 ['soft', 'softA', 'area', 'young', 'nu', 'grav', 'tear', 'cut', 'collide', 'tearAt'].forEach(id => $(id).addEventListener('input', applyControls));
 $('fem').addEventListener('change', () => { applyControls(); build(); });
