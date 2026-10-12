@@ -1,7 +1,15 @@
 import { Sim } from './sim.js';
-import { WasmSim, loadCore, simdSupported } from './wasm-sim.js';
+import { WasmSim, loadCore, loadCoreMT, simdSupported, mtSupported } from './wasm-sim.js';
 import scalarUrl from './wasm/core.scalar.wasm?url';
 import simdUrl from './wasm/core.simd.wasm?url';
+import mtUrl from './wasm/core.simd.mt.wasm?url';
+import WorkerBrowser from './wasm-worker-browser.js?worker';
+
+// воркер под интерфейс wasm-sim.js
+function spawnBrowser() {
+  const w = new WorkerBrowser();
+  return { post: d => w.postMessage(d), onready: cb => { w.onmessage = e => e.data && e.data.ready && cb(); }, onerror: cb => { w.onerror = cb; }, terminate: () => w.terminate() };
+}
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
@@ -11,6 +19,12 @@ const cores = {};
 // Ядро: JS / WASM (скаляр) / WASM SIMD. Если SIMD не поддерживается браузером — пункт недоступен
 async function makeSim(kind) {
   if (kind === 'js') return new Sim();
+  if (kind === 'mt') {
+    if (!cores.mt) cores.mt = await loadCoreMT(mtUrl, spawnBrowser);
+    const s = new WasmSim(cores.mt, { simd: true });
+    await s.setThreads(+$('thr').value);
+    return s;
+  }
   if (!cores[kind]) cores[kind] = await loadCore(kind === 'simd' ? simdUrl : scalarUrl);
   return new WasmSim(cores[kind], { simd: kind === 'simd' });
 }
@@ -75,6 +89,7 @@ function showValues() {
   set('nu', $('nu').value, sim.nu.toFixed(2));
   set('grav', $('grav').value);
   { const k = +$('detail').value; $('v-detail').innerHTML = `×${k} <i>(~${((26 * k + 1) * (8 * k + 1)).toLocaleString('ru')} частиц)</i>`; }
+  set('thr', $('thr').value, '');
   set('sub', $('sub').value, $('adapt').checked ? 'авто ≤' : '');
   set('tearAt', $('tearAt').value, sim.femEnabled ? '% от E' : '% удл.');
 }
@@ -86,8 +101,11 @@ $('reset').addEventListener('click', build);
 applyControls();
 build();
 if (!simdSupported()) $('backend').querySelector('option[value=simd]').disabled = true;
+{ const hc = navigator.hardwareConcurrency || 4; $('thr').max = Math.max(1, Math.min(8, hc)); $('thr').value = Math.max(1, Math.min(4, hc >> 1)); }
+if (!simdSupported() || !mtSupported()) $('backend').querySelector('option[value=mt]').disabled = true;
+$('thr').addEventListener('change', async () => { if (sim.setThreads && sim.mt) await sim.setThreads(+$('thr').value); });
 $('backend').addEventListener('change', () => setBackend($('backend').value));
-setBackend(simdSupported() ? 'simd' : 'scalar'); // по умолчанию самое быстрое ядро
+setBackend(simdSupported() ? (mtSupported() ? 'mt' : 'simd') : 'scalar'); // по умолчанию самое быстрое ядро
 
 // --- нож (M4.1): проведи линию по плите и отпусти — плита разрежется вдоль неё ---
 let knife = false, stroke = null;
@@ -228,7 +246,7 @@ function frame(now) {
   last = now;
   while (acc >= DT) { moveDrag(DT); const t0 = performance.now(); sim.step(DT); sim.stepMs = sim.stepMs * 0.95 + (performance.now() - t0) * 0.05; acc -= DT; }
   draw();
-  $('info').textContent = `ядро: ${$('backend').value} · ${sim.stepMs.toFixed(2)} мс/кадр · частиц: ${sim.n} · кусков: ${sim.pieces} · трещин: ${sim.splits} · контактов: ${sim.contacts} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
+  $('info').textContent = `ядро: ${$('backend').value}${sim.mt ? '×' + sim.threads : ''} · ${sim.stepMs.toFixed(2)} мс/кадр · частиц: ${sim.n} · кусков: ${sim.pieces} · трещин: ${sim.splits} · контактов: ${sim.contacts} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
