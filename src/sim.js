@@ -1,6 +1,8 @@
 // Ядро симуляции: 2D XPBD с «малыми шагами» (small steps).
 // Позже этот файл переписывается на C++ (тот же интерфейс → WASM).
 
+const hyp = (a, b) => Math.sqrt(a * a + b * b); // вместо Math.hypot: быстрее и бит-в-бит совпадает с C++ ядром
+
 export class Sim {
   constructor() {
     this.gravity = 900;       // px/s^2
@@ -22,6 +24,7 @@ export class Sim {
     this.tearEnabled = false;
     this.tearStrain = 0.45;   // относительное удлинение, при котором ребро рвётся
     this.bounds = { w: 800, h: 600 };
+    this.stepMs = 0;          // сглаженное время step() (для индикатора)
     this.clear();
   }
 
@@ -108,7 +111,7 @@ export class Sim {
     this.rest = new Float64Array(m);
     for (let e = 0; e < m; e++) {
       const a = this.edges[e * 2], b = this.edges[e * 2 + 1];
-      this.rest[e] = Math.hypot(this.x[a * 2] - this.x[b * 2], this.x[a * 2 + 1] - this.x[b * 2 + 1]);
+      this.rest[e] = hyp(this.x[a * 2] - this.x[b * 2], this.x[a * 2 + 1] - this.x[b * 2 + 1]);
     }
     this.alive = new Uint8Array(m).fill(1);
     this.strain = new Float32Array(m);
@@ -150,7 +153,7 @@ export class Sim {
     const m00 = m[t * 4], m01 = m[t * 4 + 1], m10 = m[t * 4 + 2], m11 = m[t * 4 + 3];
     const a = dx1 * m00 + dx2 * m10, b = dx1 * m01 + dx2 * m11;
     const c = dy1 * m00 + dy2 * m10, d = dy1 * m01 + dy2 * m11;
-    const u1 = a + d, u2 = c - b, len = Math.hypot(u1, u2);
+    const u1 = a + d, u2 = c - b, len = hyp(u1, u2);
     let cs = 1, sn = 0;
     if (len > 1e-12) { cs = u1 / len; sn = u2 / len; }
     out[0] = a; out[1] = b; out[2] = c; out[3] = d; out[4] = cs; out[5] = sn; out[6] = len;
@@ -188,7 +191,7 @@ export class Sim {
       // 1) девиаторная часть: C = ||F - R||_F,  α = 1/(2 μ V0)
       this._defRot(t, f);
       const e00 = f[0] - f[4], e01 = f[1] + f[5], e10 = f[2] - f[5], e11 = f[3] - f[4];
-      const C = Math.hypot(e00, e01, e10, e11);
+      const C = Math.sqrt(e00 * e00 + e01 * e01 + e10 * e10 + e11 * e11);
       if (C > 1e-9) this._apply(t, e00 / C, e01 / C, e10 / C, e11 / C, C, 1 / (2 * mu * vol[t]) / h2);
       // 2) объёмная часть: C = tr(R^T F) - 2,  dC/dF = R,  α = 1/(λ V0)
       this._defRot(t, f);
@@ -208,7 +211,7 @@ export class Sim {
       const a = f[0], b = f[1], c = f[2], d = f[3], cs = f[4], sn = f[5];
       // S = R^T F (симметричный фактор растяжения)
       const S00 = cs * a + sn * c, S01 = cs * b + sn * d, S10 = -sn * a + cs * c, S11 = -sn * b + cs * d;
-      const s01 = 0.5 * (S01 + S10), mm = 0.5 * (S00 + S11), dd = Math.hypot(0.5 * (S00 - S11), s01);
+      const s01 = 0.5 * (S01 + S10), mm = 0.5 * (S00 + S11), dd = hyp(0.5 * (S00 - S11), s01);
       const s1 = mm + dd, s2 = mm - dd, trE = s1 + s2 - 2;
       // σ_i = (2μ(s_i-1) + λ tr(S-I)) / s_j   (J = s1 s2)
       const sig1 = (2 * mu * (s1 - 1) + lam * trE) / Math.max(s2, 0.1);
@@ -216,7 +219,9 @@ export class Sim {
       const sm = Math.max(sig1, sig2);
       sigma[t] = sm;
       // тензор напряжения в мировых осях: σ = σ1 w1w1ᵀ + σ2 w2w2ᵀ, w = R·v (v — оси S)
-      const phi = 0.5 * Math.atan2(2 * s01, S00 - S11), cp = Math.cos(phi), sp = Math.sin(phi);
+      // главная ось через формулы половинного угла (без atan2/cos/sin): cos2φ = hu/dd, sin2φ = s01/dd
+      const hu = 0.5 * (S00 - S11); let cp = 1, sp = 0;
+      if (dd > 0) { cp = Math.sqrt(0.5 * (1 + hu / dd)); sp = Math.sqrt(0.5 * (1 - hu / dd)); if (s01 < 0) sp = -sp; }
       const w1x = cs * cp - sn * sp, w1y = sn * cp + cs * sp;
       const w2x = -(cs * sp + sn * cp), w2y = -sn * sp + cs * cp;
       this.sxx[t] = sig1 * w1x * w1x + sig2 * w2x * w2x;
@@ -334,7 +339,7 @@ export class Sim {
       const A = acc[v * 4 + 3];
       if (A <= 0 || this.w[v] === 0) continue;
       const a = acc[v * 4] / A, b = acc[v * 4 + 1] / A, c = acc[v * 4 + 2] / A;
-      const lam = (a + c) / 2 + Math.hypot((a - c) / 2, b);
+      const lam = (a + c) / 2 + hyp((a - c) / 2, b);
       if (lam > crit) { const psi = 0.5 * Math.atan2(2 * b, a - c); cand.push([lam, v, Math.cos(psi), Math.sin(psi)]); }
     }
     if (!cand.length) return;
@@ -410,7 +415,7 @@ export class Sim {
     let best = Infinity, be = -1;
     for (let e = 0; e < 3; e++) {
       const a = tr[t * 3 + e] * 2, b = tr[t * 3 + (e + 1) % 3] * 2;
-      const ex = x[b] - x[a], ey = x[b + 1] - x[a + 1], len = Math.hypot(ex, ey) || 1e-9;
+      const ex = x[b] - x[a], ey = x[b + 1] - x[a + 1], len = hyp(ex, ey) || 1e-9;
       const d = s * (ex * (py - x[a + 1]) - ey * (px - x[a])) / len; // > 0 — внутри
       if (d < best) { best = d; be = e; }
       if (d <= 1e-4) return -1;
@@ -477,7 +482,7 @@ export class Sim {
         let nx, ny;                                              // направление выталкивания (наружу)
         if (dist > 1e-6) { nx = (cx - px) / dist; ny = (cy - py) / dist; }
         else {                                                   // вершина на самой границе: нормаль ребра от владельца
-          const o = barr[bq + 2], a1 = ia * 2, ex = x[ib * 2] - x[a1], ey = x[ib * 2 + 1] - x[a1 + 1], l = Math.hypot(ex, ey) || 1e-9;
+          const o = barr[bq + 2], a1 = ia * 2, ex = x[ib * 2] - x[a1], ey = x[ib * 2 + 1] - x[a1 + 1], l = hyp(ex, ey) || 1e-9;
           let c3 = tr[o * 3]; if (c3 === ia || c3 === ib) c3 = tr[o * 3 + 1]; if (c3 === ia || c3 === ib) c3 = tr[o * 3 + 2];
           nx = ey / l; ny = -ex / l;
           if (nx * (x[c3 * 2] - x[a1]) + ny * (x[c3 * 2 + 1] - x[a1 + 1]) > 0) { nx = -nx; ny = -ny; }
@@ -551,7 +556,7 @@ export class Sim {
         const wa = w[a], wb = w[b], ws = wa + wb;
         if (ws === 0) continue;
         let dx = x[a * 2] - x[b * 2], dy = x[a * 2 + 1] - x[b * 2 + 1];
-        const len = Math.hypot(dx, dy) || 1e-9;
+        const len = hyp(dx, dy) || 1e-9;
         const C = len - rest[e];
         const dl = -C / (ws + alpha);       // Δλ в XPBD при λ=0
         dx /= len; dy /= len;
@@ -606,7 +611,7 @@ export class Sim {
     for (let e = 0; e < m; e++) {
       if (!alive[e]) { strain[e] = 0; continue; }
       const a = edges[e * 2], b = edges[e * 2 + 1];
-      const len = Math.hypot(x[a * 2] - x[b * 2], x[a * 2 + 1] - x[b * 2 + 1]);
+      const len = hyp(x[a * 2] - x[b * 2], x[a * 2 + 1] - x[b * 2 + 1]);
       const st = Math.abs(len - rest[e]) / rest[e];
       strain[e] = st;
       if (!this.femEnabled && this.tearEnabled && len > rest[e] && st > this.tearStrain) alive[e] = 0;
