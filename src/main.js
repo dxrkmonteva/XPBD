@@ -1,9 +1,24 @@
 import { Sim } from './sim.js';
+import { WasmSim, loadCore, simdSupported } from './wasm-sim.js';
+import scalarUrl from './wasm/core.scalar.wasm?url';
+import simdUrl from './wasm/core.simd.wasm?url';
 
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 const $ = id => document.getElementById(id);
-const sim = new Sim();
+let sim = new Sim();
+const cores = {};
+// Ядро: JS / WASM (скаляр) / WASM SIMD. Если SIMD не поддерживается браузером — пункт недоступен
+async function makeSim(kind) {
+  if (kind === 'js') return new Sim();
+  if (!cores[kind]) cores[kind] = await loadCore(kind === 'simd' ? simdUrl : scalarUrl);
+  return new WasmSim(cores[kind], { simd: kind === 'simd' });
+}
+async function setBackend(kind) {
+  try { sim = await makeSim(kind); } catch (e) { console.warn('WASM недоступен, остаёмся на JS', e); kind = 'js'; sim = new Sim(); }
+  $('backend').value = kind;
+  resize(); applyControls(); build();
+}
 
 let dpr = 1;
 function resize() {
@@ -61,6 +76,9 @@ $('pin').addEventListener('change', build);
 $('reset').addEventListener('click', build);
 applyControls();
 build();
+if (!simdSupported()) $('backend').querySelector('option[value=simd]').disabled = true;
+$('backend').addEventListener('change', () => setBackend($('backend').value));
+setBackend(simdSupported() ? 'simd' : 'scalar'); // по умолчанию самое быстрое ядро
 
 // --- нож (M4.1): проведи линию по плите и отпусти — плита разрежется вдоль неё ---
 let knife = false, stroke = null;
@@ -199,9 +217,9 @@ const DT = 1 / 60;
 function frame(now) {
   acc += Math.min(0.1, (now - last) / 1000);
   last = now;
-  while (acc >= DT) { moveDrag(DT); sim.step(DT); acc -= DT; }
+  while (acc >= DT) { moveDrag(DT); const t0 = performance.now(); sim.step(DT); sim.stepMs = sim.stepMs * 0.95 + (performance.now() - t0) * 0.05; acc -= DT; }
   draw();
-  $('info').textContent = `частиц: ${sim.n} · кусков: ${sim.pieces} · трещин: ${sim.splits} · контактов: ${sim.contacts} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
+  $('info').textContent = `ядро: ${$('backend').value} · ${sim.stepMs.toFixed(2)} мс/кадр · частиц: ${sim.n} · кусков: ${sim.pieces} · трещин: ${sim.splits} · контактов: ${sim.contacts} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
