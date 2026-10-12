@@ -21,3 +21,12 @@ if grep -q "USE_SIMD" core.cpp; then
   "$CLANG" "${COMMON[@]}" -msimd128 -DUSE_SIMD -o "$OUT/core.simd.wasm" core.cpp
   ls -l "$OUT/core.simd.wasm"
 fi
+
+if grep -q "USE_THREADS" core.cpp; then
+  echo "simd + threads..."
+  # общая (shared) память импортируется из JS; у каждого потока свой стек (JS выставляет __stack_pointer)
+  "$CLANG" --target=wasm32 -O3 -ffreestanding -nostdlib -fno-exceptions -fno-rtti -mbulk-memory -matomics -msimd128 -DUSE_SIMD -DUSE_THREADS \
+    -Wall -Wno-misleading-indentation -Wl,--no-entry -Wl,--shared-memory -Wl,--import-memory -Wl,--max-memory=268435456 \
+    -Wl,--export=__heap_base -Wl,--export=__stack_pointer -Wl,-z,stack-size=65536 -o "$OUT/core.simd.mt.wasm" core.cpp
+  ls -l "$OUT/core.simd.mt.wasm"
+fi

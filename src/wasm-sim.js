@@ -29,6 +29,25 @@ export async function loadCore(src) {
   return instance;
 }
 
+// Многопоточная сборка: память общая (SharedArrayBuffer), рабочие потоки — воркеры, которые вызывают worker_loop.
+// spawn() создаёт воркер (в браузере — Worker, в Node — worker_threads), он должен вызвать workerMain из wasm-worker.js.
+// Требуется crossOriginIsolated (заголовки COOP/COEP), иначе SharedArrayBuffer недоступен.
+export const MT_MAX_WORKERS = 8, MT_STACK = 65536;
+export function mtSupported() {
+  try { return typeof SharedArrayBuffer !== 'undefined' && (typeof crossOriginIsolated === 'undefined' || crossOriginIsolated) && typeof Atomics !== 'undefined'; } catch (e) { return false; }
+}
+export async function loadCoreMT(src, spawn) {
+  let bytes = src;
+  if (typeof src === 'string') bytes = await (await fetch(src)).arrayBuffer();
+  const module = await WebAssembly.compile(bytes);
+  const memory = new WebAssembly.Memory({ initial: 256, maximum: 4096, shared: true });
+  const instance = await WebAssembly.instantiate(module, { env: { memory } });
+  const heap = (instance.exports.__heap_base.value + 7) & ~7;
+  instance._mem = memory;
+  instance._mt = { module, memory, spawn, workers: [], stackBase: heap };
+  return instance;
+}
+
 const align8 = n => (n + 7) & ~7;
 
 export class WasmSim extends Sim {
@@ -37,7 +56,9 @@ export class WasmSim extends Sim {
     this.useColoring = !!opts.simd;
     this.inst = instance;
     this.ex = instance.exports;
-    this.mem = this.ex.memory;
+    this.mem = this.ex.memory || instance._mem;
+    this.mt = instance._mt || null;
+    this.threads = 1;
     this.P = new Float64Array(this.mem.buffer, this.ex.ctx_f64(), 32);
     this.Q = new Int32Array(this.mem.buffer, this.ex.ctx_i32(), 64);
     this.bound = false;
@@ -66,7 +87,7 @@ export class WasmSim extends Sim {
     let total = 0;
     for (const k in names) total += align8(snap[k].byteLength) + 8;
     for (const k in extra) total += align8(extra[k] * 4) + 8;
-    let base = align8(this.ex.__heap_base.value);
+    let base = align8(this.ex.__heap_base.value) + (this.mt ? MT_MAX_WORKERS * MT_STACK : 0); // перед массивами — стеки воркеров
     const need = base + total + 65536;
     const have = this.mem.buffer.byteLength;
     if (need > have) this.mem.grow(Math.ceil((need - have) / 65536));
@@ -146,8 +167,35 @@ export class WasmSim extends Sim {
     this.Q[Q.NCOLORS] = nc;
   }
 
+  // Число потоков (с главным). Воркеры создаются по требованию; ждём, пока каждый дойдёт до worker_loop.
+  async setThreads(n) {
+    n = Math.max(1, Math.min(n, MT_MAX_WORKERS + 1));
+    if (!this.mt) { this.threads = 1; return 1; }
+    const mt = this.mt;
+    while (mt.workers.length < n - 1) {
+      const tid = mt.workers.length + 1;
+      const stackTop = mt.stackBase + tid * MT_STACK; // стек воркера tid: [stackBase+(tid-1)*S, stackBase+tid*S)
+      const wk = mt.spawn();
+      await new Promise((res, rej) => {
+        wk.onready(res); wk.onerror && wk.onerror(rej);
+        wk.post({ module: mt.module, memory: mt.memory, tid, stackTop });
+      });
+      mt.workers.push(wk);
+    }
+    this.threads = n;
+    return n;
+  }
+
+  stopThreads() {
+    if (!this.mt) return;
+    this.ex.stop_workers();
+    for (const wk of this.mt.workers) wk.terminate();
+    this.mt.workers.length = 0; this.threads = 1;
+  }
+
   step(dt) {
     if (!this.bound) return;
+    if (this.mt) this.ex.set_threads(this.threads);
     const t0 = performance.now();
     if (this._gridCells() > this.gridCap) this._bind(this._gridCells() * 2); // окно выросло — пересоздаём сетку
     const P_ = this.P, Q_ = this.Q;

@@ -32,10 +32,11 @@
     <label><input id="collide" type="checkbox" checked> Столкновения кусков (M5)</label>
     <button id="knife">✂ Нож: выкл</button>
     <label>Подшаги <input id="sub" type="range" min="4" max="30" value="10"> <b class="val" id="v-sub"></b></label>
+    <label id="thr-l">Потоки <input id="thr" type="range" min="1" max="8" value="4"> <b class="val" id="v-thr"></b></label>
     <label><input id="adapt" type="checkbox"> Авто-подшаги</label>
     <label>Детализация <input id="detail" type="range" min="1" max="12" value="1"> <b class="val" id="v-detail"></b></label>
     <label>Порог разрыва <input id="tearAt" type="range" min="10" max="150" value="45"> <b class="val" id="v-tearAt"></b></label>
-    <label>Ядро <select id="backend"><option value="js">JS</option><option value="scalar">WASM</option><option value="simd">WASM SIMD</option></select></label>
+    <label>Ядро <select id="backend"><option value="js">JS</option><option value="scalar">WASM</option><option value="simd">WASM SIMD</option><option value="mt">WASM SIMD + потоки</option></select></label>
     <button id="reset">Сброс</button>
     <span id="info"></span>
   </div>

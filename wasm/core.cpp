@@ -118,6 +118,88 @@ static void femSolveScalar(f64 h) {
 
 #ifdef USE_SIMD
 #include <wasm_simd128.h>
+#endif
+
+// ================= M7: потоки (WebAssembly threads) =================
+// Рабочие потоки (Web Workers) делят с главным ту же линейную память и крутятся в worker_loop. Главный поток в step()
+// раздаёт «параллельные задачи» (parallel-for): записывает параметры, увеличивает счётчик поколений G_gen, и все потоки
+// обрабатывают свои доли; главный поток тоже работает (доля 0) и ждёт счётчик G_done. Элементы одного цвета не делят
+// вершин, поэтому записи потоков не пересекаются. Главный поток в браузере не может блокироваться — он только
+// крутится в цикле ожидания; рабочие после паузы засыпают (atomic.wait), чтобы не греть процессор между кадрами.
+enum { JOB_FEM = 1, JOB_STRESS = 2 };
+__attribute__((unused)) static void femColorRange(i32 col, i32 g0, i32 g1);
+static f64 stressRange(i32 t0, i32 t1);
+__attribute__((unused)) static i32 G_gen, G_done, G_quit, G_sleepers, G_kind, G_col, G_ng;
+static i32 G_nth = 1;
+static f64 G_smax[16];
+
+#ifdef USE_THREADS
+static const i32 PAR_MIN_GROUPS = 48, PAR_MIN_TRIS = 4096, SPIN_LIMIT = 40000;
+static inline bool parOn() { return G_nth > 1; }
+
+// Динамическое распределение: потоки берут куски по очереди (атомарный счётчик G_next), поэтому медленные ядра
+// (big.LITTLE на телефонах) не тормозят остальные — просто делают меньше кусков.
+static i32 G_next;
+static void runSlice(i32 kind, i32 tid, i32 /*nth*/) {
+  if (kind == JOB_FEM) {
+    const i32 CH = 16;
+    for (;;) {
+      const i32 lo = __atomic_fetch_add(&G_next, CH, __ATOMIC_SEQ_CST);
+      if (lo >= G_ng) break;
+      femColorRange(G_col, lo, lo + CH < G_ng ? lo + CH : G_ng);
+    }
+  } else if (kind == JOB_STRESS) {
+    const i32 CH = 512; f64 sm = 0;
+    for (;;) {
+      const i32 lo = __atomic_fetch_add(&G_next, CH, __ATOMIC_SEQ_CST);
+      if (lo >= C.T) break;
+      const f64 v = stressRange(lo, lo + CH < C.T ? lo + CH : C.T);
+      if (v > sm) sm = v;
+    }
+    G_smax[tid] = sm;
+  }
+}
+
+static void par(i32 kind) {
+  const i32 nth = G_nth;
+  __atomic_store_n(&G_done, 0, __ATOMIC_SEQ_CST);
+  G_kind = kind;
+  __atomic_store_n(&G_next, 0, __ATOMIC_SEQ_CST);
+  __atomic_add_fetch(&G_gen, 1, __ATOMIC_SEQ_CST);
+  if (__atomic_load_n(&G_sleepers, __ATOMIC_SEQ_CST) > 0) __builtin_wasm_memory_atomic_notify(&G_gen, 1000);
+  runSlice(kind, 0, nth);
+  while (__atomic_load_n(&G_done, __ATOMIC_SEQ_CST) < nth - 1) { }
+}
+
+extern "C" {
+EXPORT("set_threads") void set_threads(i32 n) { G_nth = n < 1 ? 1 : (n > 16 ? 16 : n); G_quit = 0; }
+EXPORT("stop_workers") void stop_workers() { __atomic_store_n(&G_quit, 1, __ATOMIC_SEQ_CST); __builtin_wasm_memory_atomic_notify(&G_gen, 1000); }
+EXPORT("worker_loop") void worker_loop(i32 tid) {
+  i32 seen = __atomic_load_n(&G_gen, __ATOMIC_SEQ_CST);
+  for (;;) {
+    i32 g, spins = 0;
+    while ((g = __atomic_load_n(&G_gen, __ATOMIC_SEQ_CST)) == seen) {
+      if (__atomic_load_n(&G_quit, __ATOMIC_SEQ_CST)) return;
+      if (++spins > SPIN_LIMIT) {
+        __atomic_add_fetch(&G_sleepers, 1, __ATOMIC_SEQ_CST);
+        __builtin_wasm_memory_atomic_wait32(&G_gen, seen, 2000000); // не дольше 2 мс: проверяем G_quit
+        __atomic_sub_fetch(&G_sleepers, 1, __ATOMIC_SEQ_CST);
+        spins = 0;
+      }
+    }
+    seen = g;
+    const i32 nth = G_nth;
+    if (tid < nth) { runSlice(G_kind, tid, nth); __atomic_add_fetch(&G_done, 1, __ATOMIC_SEQ_CST); }
+  }
+}
+}
+#else
+static inline bool parOn() { return false; }
+__attribute__((unused)) static const i32 PAR_MIN_GROUPS = 1 << 30; static const i32 PAR_MIN_TRIS = 1 << 30;
+static void par(i32) {}
+#endif
+
+#ifdef USE_SIMD
 // ---------- M6.2: векторное FEM-ядро (WASM SIMD, f32x4) + раскраска элементов ----------
 // Элементы одного цвета не делят вершин, поэтому 4 элемента можно обрабатывать одновременно (Гаусс–Зейдель по цветам).
 // Позиции и разности рёбер считаются в f64 (точность), тяжёлая математика (sqrt, деление, градиенты) — в f32x4,
@@ -196,8 +278,9 @@ static void prepareColored() {
 
 // Раскрашенный Гаусс–Зейдель. Для группы из 4 элементов позиции читаются ОДИН раз; обе поправки (девиаторная и
 // объёмная) считаются по векторам рёбер в регистрах (вторая — с учётом первой), в память пишется суммарная поправка.
-static void femSolveColored(f64 h) {
-  const f64 mu = muOf(), lam = lamOf(), h2 = h * h;
+static f64 G_h;
+static void femColorRange(i32 col, i32 g0, i32 g1) {
+  const f64 mu = muOf(), lam = lamOf(), h2 = G_h * G_h;
   const i32* cstart = ptr<i32>(Q_CSTART);
   const i32 Tp = Q[Q_TP]; char* base = ptr<char>(Q_ORD);
   const i32* iv0 = (const i32*)base; const i32* iv1 = iv0 + Tp; const i32* iv2 = iv1 + Tp;
@@ -205,8 +288,8 @@ static void femSolveColored(f64 h) {
   const f4 alphaD0 = F4((f32)(1 / (2 * mu) / h2)), alphaV0 = F4((f32)(lam > 0 ? 1 / lam / h2 : 0));
   const m4 lamOn = F4((f32)lam) > F4(0.0f);
   f64* xm = C.x;
-  for (i32 col = 0; col < Q[Q_NCOLORS]; col++) {
-    for (i32 k = cstart[col]; k < cstart[col + 1]; k += 4) {
+  {
+    for (i32 k = cstart[col] + 4 * g0; k < cstart[col] + 4 * g1; k += 4) {
       const f4 act4 = LD(of + O_ACT * Tp + k);
       if (!wasm_v128_any_true((v128_t)(act4 > F4(0.5f)))) continue;
       // gather: позиции вершин (f64) → векторы рёбер (f32); сборка через make/replace_lane — без обращения к памяти
@@ -242,16 +325,26 @@ static void femSolveColored(f64 h) {
     }
   }
 }
+
+static void femSolveColored(f64 h) {
+  G_h = h;
+  const i32* cstart = ptr<i32>(Q_CSTART);
+  for (i32 col = 0; col < Q[Q_NCOLORS]; col++) {
+    const i32 ng = (cstart[col + 1] - cstart[col]) / 4;
+    if (parOn() && ng >= PAR_MIN_GROUPS) { G_col = col; G_ng = ng; par(JOB_FEM); }
+    else femColorRange(col, 0, ng);
+  }
+}
 #endif
 
 // Главное напряжение Коши на элементе + тензор в мировых осях; эрозия (если трещины выключены)
-static void updateStress() {
+static f64 stressRange(i32 t0, i32 t1) {
   f64 f[8];
   const f64 mu = muOf(), lam = lamOf();
   const f64 crit = P[P_TEARSTRAIN] * P[P_YOUNG];
   const bool erode = Q[Q_TEAR] && !Q[Q_CUT];
   f64 smax = 0;
-  for (i32 t = 0; t < C.T; t++) {
+  for (i32 t = t0; t < t1; t++) {
     if (!C.triAlive[t]) { C.sigma[t] = 0; continue; }
     defRot(t, f);
     const f64 a = f[0], b = f[1], c = f[2], d = f[3], cs = f[4], sn = f[5];
@@ -273,6 +366,15 @@ static void updateStress() {
     C.syy[t] = (f32)(sig1 * w1y * w1y + sig2 * w2y * w2y);
     if (erode && sm > crit) C.triAlive[t] = 0;
   }
+  return smax;
+}
+
+static void updateStress() {
+  f64 smax = 0;
+  if (parOn() && C.T >= PAR_MIN_TRIS) {
+    par(JOB_STRESS);
+    for (i32 i = 0; i < G_nth; i++) if (G_smax[i] > smax) smax = G_smax[i];
+  } else smax = stressRange(0, C.T);
   P[P_SMAX] = smax;
 }
 
