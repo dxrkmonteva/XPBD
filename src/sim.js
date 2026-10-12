@@ -20,6 +20,8 @@ export class Sim {
     this.cellSize = 32;       // M5: размер ячейки пространственной сетки
     this.contacts = 0;        // M5: число контактов в последнем подшаге
     this.substeps = 10;
+    this.adaptive = false;    // M6.4: адаптивное число подшагов (меньше, когда всё спокойно)
+    this.vmax = 0;            // макс. скорость вершины в конце прошлого кадра
     this.damping = 0.9995;
     this.tearEnabled = false;
     this.tearStrain = 0.45;   // относительное удлинение, при котором ребро рвётся
@@ -531,14 +533,24 @@ export class Sim {
     return best;
   }
 
+  // Сколько подшагов нужно в этом кадре: вершина не должна проходить за подшаг больше ~⅓ шага сетки.
+  // В покое хватает 4 подшагов, при ударе — полное число. Скорость берётся из прошлого кадра.
+  effSubsteps(dt) {
+    const S = this.substeps;
+    if (!this.adaptive || !this.spacing) return S;
+    const need = Math.ceil(dt * this.vmax / ((this.adaptK || 0.35) * this.spacing));
+    return Math.max(Math.min(this.adaptMin || 4, S), Math.min(S, need));
+  }
+
   step(dt) {
     const { n, x, p, v, w, edges, rest, alive, strain } = this;
-    const h = dt / this.substeps;
+    const S = this.effSubsteps(dt);
+    const h = dt / S;
     const alpha = this.compliance / (h * h);
     const m = rest.length;
     const maxX = this.bounds.w - 2, maxY = this.bounds.h - 2;
 
-    for (let s = 0; s < this.substeps; s++) {
+    for (let s = 0; s < S; s++) {
       // 1. Предсказание позиций
       for (let i = 0; i < n; i++) {
         const ix = i * 2, iy = ix + 1;
@@ -605,6 +617,12 @@ export class Sim {
         v[i * 2] = (x[i * 2] - p[i * 2]) / h * this.damping;
         v[i * 2 + 1] = (x[i * 2 + 1] - p[i * 2 + 1]) / h * this.damping;
       }
+    }
+
+    if (this.adaptive) {
+      let m2 = 0;
+      for (let i = 0; i < n; i++) { const q = v[i * 2] * v[i * 2] + v[i * 2 + 1] * v[i * 2 + 1]; if (q > m2) m2 = q; }
+      this.vmax = Math.sqrt(m2);
     }
 
     // Деформация рёбер (для раскраски/разрыва) — раз за кадр

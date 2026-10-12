@@ -19,14 +19,14 @@ typedef double f64;
 #define EXPORT(name) __attribute__((export_name(name)))
 
 // ---------- параметры (f64) ----------
-enum { P_GRAV, P_COMPL, P_ACOMPL, P_DAMP, P_YOUNG, P_NU, P_TEARSTRAIN, P_BW, P_BH, P_FRIC, P_CELL, P_COUNT = 32 };
+enum { P_GRAV, P_COMPL, P_ACOMPL, P_DAMP, P_YOUNG, P_NU, P_TEARSTRAIN, P_BW, P_BH, P_FRIC, P_CELL, P_SMAX, P_VMAX, P_COUNT = 32 }; // P_SMAX — выход: макс. напряжение
 // ---------- целые параметры и указатели ----------
 enum {
   Q_N, Q_T, Q_M, Q_CAP, Q_SUBSTEPS, Q_FEM, Q_AREA, Q_COLLIDE, Q_TEAR, Q_CUT, Q_PIECES, Q_CONTACTS,
   Q_GRIDCAP, Q_ITEMSCAP, Q_NCOLORS, Q_SIMD,
   Q_X, Q_P, Q_V, Q_W, Q_EDGES, Q_REST, Q_ALIVE, Q_STRAIN, Q_TRIS, Q_TRIEDGES, Q_RESTAREA, Q_DMINV, Q_VOL,
   Q_TRIALIVE, Q_SIGMA, Q_SXX, Q_SXY, Q_SYY, Q_PIECEID, Q_VPIECE, Q_CNT, Q_POS, Q_BB, Q_ITEMS, Q_BND,
-  Q_BSTART, Q_BCOUNT, Q_CORDER, Q_CSTART, Q_CMASK, Q_COUNT = 64
+  Q_BSTART, Q_BCOUNT, Q_CORDER, Q_CSTART, Q_CMASK, Q_ORD, Q_TP, Q_DIRTY, Q_COUNT = 64
 };
 
 static f64 P[P_COUNT];
@@ -131,20 +131,12 @@ typedef int m4 __attribute__((vector_size(16)));
 #define SQRT4(v) ((f4)wasm_f32x4_sqrt((v128_t)(v)))
 #define ABS4(v) ((f4)wasm_f32x4_abs((v128_t)(v)))
 struct Def4 { f4 a, b, c, d, cs, sn, len; };
+struct Del4 { f4 x0, y0, x1, y1, x2, y2; }; // поправки к трём вершинам
 
 static inline f4 sel(m4 m, f4 a, f4 b) { return (f4)wasm_v128_bitselect((v128_t)a, (v128_t)b, (v128_t)m); }
 
-// Загрузка деформации 4 элементов из текущих позиций
-static inline void defRot4(const i32* t4, const f4 m00, const f4 m01, const f4 m10, const f4 m11, Def4& o) {
-  const f64* x = C.x; const i32* tr = C.tris;
-  f32 dx1[4], dy1[4], dx2[4], dy2[4];
-  for (i32 l = 0; l < 4; l++) {
-    const i32 t = t4[l];
-    const i32 i0 = tr[t * 3] * 2, i1 = tr[t * 3 + 1] * 2, i2 = tr[t * 3 + 2] * 2;
-    dx1[l] = (f32)(x[i1] - x[i0]); dy1[l] = (f32)(x[i1 + 1] - x[i0 + 1]);
-    dx2[l] = (f32)(x[i2] - x[i0]); dy2[l] = (f32)(x[i2 + 1] - x[i0 + 1]);
-  }
-  const f4 X1 = LD(dx1), Y1 = LD(dy1), X2 = LD(dx2), Y2 = LD(dy2);
+// Деформация 4 элементов по векторам рёбер (dx1,dy1) = x1-x0 и (dx2,dy2) = x2-x0
+static inline void defRot4(f4 X1, f4 Y1, f4 X2, f4 Y2, f4 m00, f4 m01, f4 m10, f4 m11, Def4& o) {
   o.a = X1 * m00 + X2 * m10; o.b = X1 * m01 + X2 * m11;
   o.c = Y1 * m00 + Y2 * m10; o.d = Y1 * m01 + Y2 * m11;
   const f4 u1 = o.a + o.d, u2 = o.c - o.b;
@@ -154,64 +146,99 @@ static inline void defRot4(const i32* t4, const f4 m00, const f4 m01, const f4 m
   o.cs = sel(ok, u1 * inv, F4(1.0f)); o.sn = sel(ok, u2 * inv, F4(0.0f));
 }
 
-static inline void applyC4(const i32* t4, const f4 m00, const f4 m01, const f4 m10, const f4 m11,
-                           f4 g00, f4 g01, f4 g10, f4 g11, f4 Cv, f4 alphaBar, m4 active) {
-  f64* x = C.x; const f64* w = C.w; const i32* tr = C.tris;
+// Поправка XPBD для ограничения с градиентом G (как applyC), без записи в память
+static inline void deltaC4(f4 m00, f4 m01, f4 m10, f4 m11, f4 w0, f4 w1, f4 w2,
+                           f4 g00, f4 g01, f4 g10, f4 g11, f4 Cv, f4 alphaBar, m4 active, Del4& d) {
   const f4 h1x = g00 * m00 + g01 * m01, h2x = g00 * m10 + g01 * m11;
   const f4 h1y = g10 * m00 + g11 * m01, h2y = g10 * m10 + g11 * m11;
   const f4 h0x = -(h1x + h2x), h0y = -(h1y + h2y);
-  f32 wa[4], wb[4], wc[4];
-  for (i32 l = 0; l < 4; l++) {
-    const i32 t = t4[l];
-    wa[l] = (f32)w[tr[t * 3]]; wb[l] = (f32)w[tr[t * 3 + 1]]; wc[l] = (f32)w[tr[t * 3 + 2]];
-  }
-  const f4 w0 = LD(wa), w1 = LD(wb), w2 = LD(wc);
   const f4 den = w0 * (h0x * h0x + h0y * h0y) + w1 * (h1x * h1x + h1y * h1y) + w2 * (h2x * h2x + h2y * h2y) + alphaBar;
   const m4 ok = active & (den > F4(1e-18f));
   const f4 dl = sel(ok, -Cv / sel(ok, den, F4(1.0f)), F4(0.0f));
-  f32 o[8];
-  ST(o, w0 * dl * h0x); ST(o + 4, w0 * dl * h0y);
-  f32 s1x[4], s1y[4], s2x[4], s2y[4];
-  ST(s1x, w1 * dl * h1x); ST(s1y, w1 * dl * h1y);
-  ST(s2x, w2 * dl * h2x); ST(s2y, w2 * dl * h2y);
-  for (i32 l = 0; l < 4; l++) {
-    const i32 t = t4[l];
-    const i32 p0 = tr[t * 3] * 2, p1 = tr[t * 3 + 1] * 2, p2 = tr[t * 3 + 2] * 2;
-    x[p0] += o[l]; x[p0 + 1] += o[4 + l];
-    x[p1] += s1x[l]; x[p1 + 1] += s1y[l];
-    x[p2] += s2x[l]; x[p2 + 1] += s2y[l];
+  d.x0 = w0 * dl * h0x; d.y0 = w0 * dl * h0y;
+  d.x1 = w1 * dl * h1x; d.y1 = w1 * dl * h1y;
+  d.x2 = w2 * dl * h2x; d.y2 = w2 * dl * h2y;
+}
+
+// Данные элементов в порядке раскраски (SoA, группами по 4, хвост группы дополнен пустыми элементами):
+// v0,v1,v2 (смещения вершин в f64-массиве x), m00..m11 (Dm^-1, f32), 1/V, w0,w1,w2 (обратные массы вершин), act.
+// Статическая часть (индексы, Dm^-1, 1/V) пересчитывается при смене топологии (Q_DIRTY), динамическая (w, act) —
+// раз за кадр: так горячий цикл читает всё подряд, а в памяти «случайно» остаются только позиции вершин.
+enum { O_V0, O_V1, O_V2, O_M00, O_M01, O_M10, O_M11, O_IV, O_W0, O_W1, O_W2, O_ACT, O_N };
+
+static void prepareColored() {
+  const i32 Tp = Q[Q_TP]; char* base = ptr<char>(Q_ORD);
+  const i32* order = ptr<i32>(Q_CORDER); const i32* tr = C.tris; const f64* w = C.w;
+  i32* ov[3] = {(i32*)base, (i32*)base + Tp, (i32*)base + 2 * Tp};
+  f32* of = (f32*)base;
+  if (Q[Q_DIRTY]) {
+    for (i32 i = 0; i < Tp; i++) {
+      const i32 t = order[i];
+      if (t < 0) {
+        ov[0][i] = ov[1][i] = ov[2][i] = 0;
+        for (i32 q = 0; q < 4; q++) of[(O_M00 + q) * Tp + i] = 0;
+        of[O_IV * Tp + i] = 0;
+        continue;
+      }
+      ov[0][i] = tr[t * 3] * 2; ov[1][i] = tr[t * 3 + 1] * 2; ov[2][i] = tr[t * 3 + 2] * 2;
+      for (i32 q = 0; q < 4; q++) of[(O_M00 + q) * Tp + i] = (f32)C.dmInv[t * 4 + q];
+      of[O_IV * Tp + i] = (f32)(1.0 / C.vol[t]);
+    }
+    Q[Q_DIRTY] = 0;
+  }
+  for (i32 i = 0; i < Tp; i++) {
+    const i32 t = order[i];
+    if (t < 0) { of[O_ACT * Tp + i] = 0; of[O_W0 * Tp + i] = of[O_W1 * Tp + i] = of[O_W2 * Tp + i] = 0; continue; }
+    of[O_ACT * Tp + i] = C.triAlive[t] ? 1.0f : 0.0f;
+    of[O_W0 * Tp + i] = (f32)w[tr[t * 3]]; of[O_W1 * Tp + i] = (f32)w[tr[t * 3 + 1]]; of[O_W2 * Tp + i] = (f32)w[tr[t * 3 + 2]];
   }
 }
 
+// Раскрашенный Гаусс–Зейдель. Для группы из 4 элементов позиции читаются ОДИН раз; обе поправки (девиаторная и
+// объёмная) считаются по векторам рёбер в регистрах (вторая — с учётом первой), в память пишется суммарная поправка.
 static void femSolveColored(f64 h) {
   const f64 mu = muOf(), lam = lamOf(), h2 = h * h;
-  const i32* order = ptr<i32>(Q_CORDER); const i32* cstart = ptr<i32>(Q_CSTART);
+  const i32* cstart = ptr<i32>(Q_CSTART);
+  const i32 Tp = Q[Q_TP]; char* base = ptr<char>(Q_ORD);
+  const i32* iv0 = (const i32*)base; const i32* iv1 = iv0 + Tp; const i32* iv2 = iv1 + Tp;
+  const f32* of = (const f32*)base;
   const f4 alphaD0 = F4((f32)(1 / (2 * mu) / h2)), alphaV0 = F4((f32)(lam > 0 ? 1 / lam / h2 : 0));
+  const m4 lamOn = F4((f32)lam) > F4(0.0f);
+  f64* xm = C.x;
   for (i32 col = 0; col < Q[Q_NCOLORS]; col++) {
-    const i32 s = cstart[col], e = cstart[col + 1];
-    for (i32 k = s; k < e; k += 4) {
-      i32 t4[4]; f32 alive[4], vol[4], m[16];
-      for (i32 l = 0; l < 4; l++) {
-        const i32 t = order[(k + l < e) ? k + l : k]; // хвост группы дублирует первый элемент (поправка для него обнуляется маской)
-        t4[l] = t; alive[l] = (k + l < e && C.triAlive[t]) ? 1.0f : 0.0f;
-        vol[l] = (f32)C.vol[t];
-        for (i32 q = 0; q < 4; q++) m[q * 4 + l] = (f32)C.dmInv[t * 4 + q];
-      }
-      const m4 act = LD(alive) > F4(0.5f);
-      const f4 m00 = LD(m), m01 = LD(m + 4), m10 = LD(m + 8), m11 = LD(m + 12);
-      const f4 V = LD(vol);
-      Def4 d;
-      defRot4(t4, m00, m01, m10, m11, d);
+    for (i32 k = cstart[col]; k < cstart[col + 1]; k += 4) {
+      const f4 act4 = LD(of + O_ACT * Tp + k);
+      if (!wasm_v128_any_true((v128_t)(act4 > F4(0.5f)))) continue;
+      // gather: позиции вершин (f64) → векторы рёбер (f32); сборка через make/replace_lane — без обращения к памяти
+      const i32 *I0 = iv0 + k, *I1 = iv1 + k, *I2 = iv2 + k;
+#define EDGE(l, X, Y) ((f32)(xm[X[l]] - xm[I0[l]])), ((f32)(xm[X[l] + 1] - xm[I0[l] + 1]))
+      f4 X1 = (f4)wasm_f32x4_make((f32)(xm[I1[0]] - xm[I0[0]]), (f32)(xm[I1[1]] - xm[I0[1]]), (f32)(xm[I1[2]] - xm[I0[2]]), (f32)(xm[I1[3]] - xm[I0[3]]));
+      f4 Y1 = (f4)wasm_f32x4_make((f32)(xm[I1[0] + 1] - xm[I0[0] + 1]), (f32)(xm[I1[1] + 1] - xm[I0[1] + 1]), (f32)(xm[I1[2] + 1] - xm[I0[2] + 1]), (f32)(xm[I1[3] + 1] - xm[I0[3] + 1]));
+      f4 X2 = (f4)wasm_f32x4_make((f32)(xm[I2[0]] - xm[I0[0]]), (f32)(xm[I2[1]] - xm[I0[1]]), (f32)(xm[I2[2]] - xm[I0[2]]), (f32)(xm[I2[3]] - xm[I0[3]]));
+      f4 Y2 = (f4)wasm_f32x4_make((f32)(xm[I2[0] + 1] - xm[I0[0] + 1]), (f32)(xm[I2[1] + 1] - xm[I0[1] + 1]), (f32)(xm[I2[2] + 1] - xm[I0[2] + 1]), (f32)(xm[I2[3] + 1] - xm[I0[3] + 1]));
+#undef EDGE
+      const m4 act = act4 > F4(0.5f);
+      const f4 m00 = LD(of + O_M00 * Tp + k), m01 = LD(of + O_M01 * Tp + k), m10 = LD(of + O_M10 * Tp + k), m11 = LD(of + O_M11 * Tp + k);
+      const f4 iV = LD(of + O_IV * Tp + k), w0 = LD(of + O_W0 * Tp + k), w1 = LD(of + O_W1 * Tp + k), w2 = LD(of + O_W2 * Tp + k);
+      Def4 d; Del4 q1, q2;
+      defRot4(X1, Y1, X2, Y2, m00, m01, m10, m11, d);
       const f4 e00 = d.a - d.cs, e01 = d.b + d.sn, e10 = d.c - d.sn, e11 = d.d - d.cs;
       const f4 Cd = SQRT4(e00 * e00 + e01 * e01 + e10 * e10 + e11 * e11);
       const m4 okd = act & (Cd > F4(1e-9f));
       const f4 invC = F4(1.0f) / sel(okd, Cd, F4(1.0f));
-      applyC4(t4, m00, m01, m10, m11, e00 * invC, e01 * invC, e10 * invC, e11 * invC, Cd, alphaD0 / V, okd);
-      defRot4(t4, m00, m01, m10, m11, d);
+      deltaC4(m00, m01, m10, m11, w0, w1, w2, e00 * invC, e01 * invC, e10 * invC, e11 * invC, Cd, alphaD0 * iV, okd, q1);
+      X1 += q1.x1 - q1.x0; Y1 += q1.y1 - q1.y0; X2 += q1.x2 - q1.x0; Y2 += q1.y2 - q1.y0;
+      defRot4(X1, Y1, X2, Y2, m00, m01, m10, m11, d);
       const f4 C2 = d.len - F4(2.0f);
-      const m4 okv = act & (ABS4(C2) > F4(1e-12f));
-      if (lam > 0 && wasm_v128_any_true((v128_t)okv))
-        applyC4(t4, m00, m01, m10, m11, d.cs, -d.sn, d.sn, d.cs, C2, alphaV0 / V, okv);
+      const m4 okv = act & (ABS4(C2) > F4(1e-12f)) & lamOn;
+      deltaC4(m00, m01, m10, m11, w0, w1, w2, d.cs, -d.sn, d.sn, d.cs, C2, alphaV0 * iV, okv, q2);
+      const f4 Ax = q1.x0 + q2.x0, Ay = q1.y0 + q2.y0, Bx = q1.x1 + q2.x1, By = q1.y1 + q2.y1, Cx = q1.x2 + q2.x2, Cy = q1.y2 + q2.y2;
+#define SCAT(l) { const i32 a0 = I0[l], a1 = I1[l], a2 = I2[l]; \
+        xm[a0] += wasm_f32x4_extract_lane((v128_t)Ax, l); xm[a0 + 1] += wasm_f32x4_extract_lane((v128_t)Ay, l); \
+        xm[a1] += wasm_f32x4_extract_lane((v128_t)Bx, l); xm[a1 + 1] += wasm_f32x4_extract_lane((v128_t)By, l); \
+        xm[a2] += wasm_f32x4_extract_lane((v128_t)Cx, l); xm[a2 + 1] += wasm_f32x4_extract_lane((v128_t)Cy, l); }
+      SCAT(0) SCAT(1) SCAT(2) SCAT(3)
+#undef SCAT
     }
   }
 }
@@ -223,6 +250,7 @@ static void updateStress() {
   const f64 mu = muOf(), lam = lamOf();
   const f64 crit = P[P_TEARSTRAIN] * P[P_YOUNG];
   const bool erode = Q[Q_TEAR] && !Q[Q_CUT];
+  f64 smax = 0;
   for (i32 t = 0; t < C.T; t++) {
     if (!C.triAlive[t]) { C.sigma[t] = 0; continue; }
     defRot(t, f);
@@ -234,6 +262,7 @@ static void updateStress() {
     const f64 sig2 = (2 * mu * (s2 - 1) + lam * trE) / (s1 > 0.1 ? s1 : 0.1);
     const f64 sm = sig1 > sig2 ? sig1 : sig2;
     C.sigma[t] = (f32)sm;
+    if (sm > smax) smax = sm;
     const f64 hu = 0.5 * (S00 - S11);
     f64 cp = 1, sp = 0;
     if (dd > 0) { cp = __builtin_sqrt(0.5 * (1 + hu / dd)); sp = __builtin_sqrt(0.5 * (1 - hu / dd)); if (s01 < 0) sp = -sp; }
@@ -244,6 +273,7 @@ static void updateStress() {
     C.syy[t] = (f32)(sig1 * w1y * w1y + sig2 * w2y * w2y);
     if (erode && sm > crit) C.triAlive[t] = 0;
   }
+  P[P_SMAX] = smax;
 }
 
 // ================= M5: столкновения между кусками =================
@@ -383,6 +413,9 @@ EXPORT("step") void step(f64 dt) {
   const f64 maxX = P[P_BW] - 2, maxY = P[P_BH] - 2;
   const f64 grav = P[P_GRAV], damp = P[P_DAMP];
   Q[Q_CONTACTS] = 0;
+#ifdef USE_SIMD
+  if (fem && Q[Q_NCOLORS] > 0) prepareColored();
+#endif
 
   for (i32 s = 0; s < substeps; s++) {
     // 1. предсказание позиций
@@ -456,6 +489,11 @@ EXPORT("step") void step(f64 dt) {
     }
   }
 
+  {
+    f64 m2 = 0;
+    for (i32 i = 0; i < n; i++) { const f64 q = v[i * 2] * v[i * 2] + v[i * 2 + 1] * v[i * 2 + 1]; if (q > m2) m2 = q; }
+    P[P_VMAX] = __builtin_sqrt(m2);
+  }
   // деформация рёбер (раскраска / разрыв без FEM) — раз за кадр
   const bool tear = Q[Q_TEAR] != 0;
   for (i32 e = 0; e < m; e++) {

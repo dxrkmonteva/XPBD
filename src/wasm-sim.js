@@ -4,12 +4,12 @@
 import { Sim } from './sim.js';
 
 // Порядок ОБЯЗАН совпадать с enum в wasm/core.cpp
-const PN = ['GRAV', 'COMPL', 'ACOMPL', 'DAMP', 'YOUNG', 'NU', 'TEARSTRAIN', 'BW', 'BH', 'FRIC', 'CELL'];
+const PN = ['GRAV', 'COMPL', 'ACOMPL', 'DAMP', 'YOUNG', 'NU', 'TEARSTRAIN', 'BW', 'BH', 'FRIC', 'CELL', 'SMAX', 'VMAX'];
 const QN = ['N', 'T', 'M', 'CAP', 'SUBSTEPS', 'FEM', 'AREA', 'COLLIDE', 'TEAR', 'CUT', 'PIECES', 'CONTACTS',
   'GRIDCAP', 'ITEMSCAP', 'NCOLORS', 'SIMD',
   'X', 'P', 'V', 'W', 'EDGES', 'REST', 'ALIVE', 'STRAIN', 'TRIS', 'TRIEDGES', 'RESTAREA', 'DMINV', 'VOL',
   'TRIALIVE', 'SIGMA', 'SXX', 'SXY', 'SYY', 'PIECEID', 'VPIECE', 'CNT', 'POS', 'BB', 'ITEMS', 'BND',
-  'BSTART', 'BCOUNT', 'CORDER', 'CSTART', 'CMASK'];
+  'BSTART', 'BCOUNT', 'CORDER', 'CSTART', 'CMASK', 'ORD', 'TP', 'DIRTY'];
 const P = {}, Q = {};
 PN.forEach((k, i) => { P[k] = i; });
 QN.forEach((k, i) => { Q[k] = i; });
@@ -62,7 +62,7 @@ export class WasmSim extends Sim {
     const snap = {};
     for (const k in names) snap[k] = this[k].slice();
     const gridCap = Math.max(gridNeed, 4096), itemsCap = Math.max(T * 16, 1 << 14);
-    const extra = { CNT: gridCap + 1, POS: gridCap, BB: T * 4, ITEMS: itemsCap, BND: 9 * T + 3, CORDER: T + 4, CSTART: 66, BSTART: cap, BCOUNT: cap };
+    const extra = { CNT: gridCap + 1, POS: gridCap, BB: T * 4, ITEMS: itemsCap, BND: 9 * T + 3, CORDER: T + 160, CSTART: 66, ORD: 12 * (T + 160), BSTART: cap, BCOUNT: cap };
     let total = 0;
     for (const k in names) total += align8(snap[k].byteLength) + 8;
     for (const k in extra) total += align8(extra[k] * 4) + 8;
@@ -86,7 +86,7 @@ export class WasmSim extends Sim {
       ex[k] = new Int32Array(buf, off, extra[k]); this.Q[Q[k]] = off;
       off += align8(extra[k] * 4) + 8;
     }
-    this._corder = ex.CORDER; this._cstart = ex.CSTART;
+    this._corder = ex.CORDER; this._ord = ex.ORD; this._cstart = ex.CSTART;
     this._bnd = ex.BND; this._bStart = ex.BSTART; this._bCount = ex.BCOUNT;
     this.gridCap = gridCap; this.itemsCap = itemsCap;
     this.Q[Q.GRIDCAP] = gridCap; this.Q[Q.ITEMSCAP] = itemsCap;
@@ -122,6 +122,7 @@ export class WasmSim extends Sim {
   }
 
   // Жадная раскраска элементов: два элемента одного цвета не делят вершин → их можно решать одновременно (SIMD).
+  // Порядок элементов — по цветам, каждый цвет дополнен до кратного 4 пустыми местами (-1).
   _recolor() {
     const T = this.triAlive.length, tr = this.tris, vm = new Uint32Array(this.cap), col = new Int8Array(T);
     let nc = 0;
@@ -133,12 +134,15 @@ export class WasmSim extends Sim {
       const bit = 1 << c; vm[tr[t * 3]] |= bit; vm[tr[t * 3 + 1]] |= bit; vm[tr[t * 3 + 2]] |= bit;
     }
     this.colors = nc;
-    const cnt = new Int32Array(nc + 1);
-    for (let t = 0; t < T; t++) cnt[col[t] + 1]++;
-    for (let c = 0; c < nc; c++) cnt[c + 1] += cnt[c];
-    this._cstart.set(cnt);
-    const pos = cnt.slice();
+    const cnt = new Int32Array(nc);
+    for (let t = 0; t < T; t++) cnt[col[t]]++;
+    const start = new Int32Array(nc + 1);
+    for (let c = 0; c < nc; c++) start[c + 1] = start[c] + ((cnt[c] + 3) & ~3);
+    this._cstart.set(start);
+    this._corder.fill(-1, 0, start[nc]);
+    const pos = start.slice(0, nc);
     for (let t = 0; t < T; t++) this._corder[pos[col[t]]++] = t;
+    this.Q[Q.TP] = start[nc]; this.Q[Q.DIRTY] = 1;
     this.Q[Q.NCOLORS] = nc;
   }
 
@@ -151,12 +155,15 @@ export class WasmSim extends Sim {
     P_[P.YOUNG] = this.young; P_[P.NU] = this.nu; P_[P.TEARSTRAIN] = this.tearStrain;
     P_[P.BW] = this.bounds.w; P_[P.BH] = this.bounds.h; P_[P.FRIC] = this.friction; P_[P.CELL] = this.cellSize;
     Q_[Q.N] = this.n; Q_[Q.T] = this.triAlive.length; Q_[Q.M] = this.rest.length; Q_[Q.CAP] = this.cap;
-    Q_[Q.SUBSTEPS] = this.substeps; Q_[Q.FEM] = +this.femEnabled; Q_[Q.AREA] = +this.areaEnabled;
+    Q_[Q.SUBSTEPS] = this.effSubsteps(dt); Q_[Q.FEM] = +this.femEnabled; Q_[Q.AREA] = +this.areaEnabled;
     Q_[Q.COLLIDE] = +this.collideEnabled; Q_[Q.TEAR] = +this.tearEnabled; Q_[Q.CUT] = +this.cutEnabled;
     Q_[Q.PIECES] = this.pieces;
     this.ex.step(dt);
     this.contacts = Q_[Q.CONTACTS];
-    if (this.femEnabled && this.tearEnabled && this.cutEnabled) this.cutStep(this.tearStrain * this.young);
+    this.vmax = P_[P.VMAX];
+    // cutStep дорогой (O(T) на JS): пропускаем, если ни один элемент не достиг прочности (осреднённое по вершине
+    // главное напряжение не может превысить максимум по элементам)
+    if (this.femEnabled && this.tearEnabled && this.cutEnabled && P_[P.SMAX] > this.tearStrain * this.young) this.cutStep(this.tearStrain * this.young);
     this.lastStepMs = performance.now() - t0;
   }
 }
