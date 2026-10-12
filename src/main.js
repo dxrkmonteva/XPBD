@@ -34,9 +34,13 @@ addEventListener('resize', resize);
 resize();
 
 function build() {
-  const spacing = Math.max(12, Math.min(18, innerWidth / 36));
-  const nx = Math.min(26, Math.floor((innerWidth - 80) / spacing));
-  const ny = 8;
+  // Детализация k: плита того же размера, шаг сетки в k раз мельче → частиц в ~k² раз больше
+  const k = +$('detail').value;
+  const spacing0 = Math.max(12, Math.min(18, innerWidth / 36));
+  const nx0 = Math.min(26, Math.floor((innerWidth - 80) / spacing0));
+  const spacing = spacing0 / k, nx = nx0 * k, ny = 8 * k;
+  sim.substeps = Math.min(20, 9 + k); // мельче сетка → больше подшагов (иначе при ударе элементы выворачиваются)
+  sim.maxSplits = 2 * k; // трещина растёт с той же скоростью относительно размера плиты
   const ox = Math.max(20, (innerWidth - nx * spacing) / 2);
   // плита стартует ниже панели управления (на телефоне панель занимает несколько строк)
   const oy = Math.max(140, Math.ceil($('hud').getBoundingClientRect().bottom) + 20);
@@ -68,9 +72,11 @@ function showValues() {
   set('young', $('young').value, sci(sim.young));
   set('nu', $('nu').value, sim.nu.toFixed(2));
   set('grav', $('grav').value);
+  { const k = +$('detail').value; $('v-detail').innerHTML = `×${k} <i>(~${((26 * k + 1) * (8 * k + 1)).toLocaleString('ru')} частиц)</i>`; }
   set('tearAt', $('tearAt').value, sim.femEnabled ? '% от E' : '% удл.');
 }
-['soft', 'softA', 'area', 'young', 'nu', 'grav', 'tear', 'cut', 'collide', 'tearAt'].forEach(id => $(id).addEventListener('input', applyControls));
+['soft', 'softA', 'area', 'young', 'nu', 'grav', 'tear', 'cut', 'collide', 'tearAt', 'detail'].forEach(id => $(id).addEventListener('input', applyControls));
+$('detail').addEventListener('change', build); // пересборка сетки при отпускании ползунка
 $('fem').addEventListener('change', () => { applyControls(); build(); });
 $('pin').addEventListener('change', build);
 $('reset').addEventListener('click', build);

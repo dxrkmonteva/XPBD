@@ -31,6 +31,7 @@
     <label><input id="cut" type="checkbox" checked> Трещины (M4)</label>
     <label><input id="collide" type="checkbox" checked> Столкновения кусков (M5)</label>
     <button id="knife">✂ Нож: выкл</button>
+    <label>Детализация <input id="detail" type="range" min="1" max="12" value="1"> <b class="val" id="v-detail"></b></label>
     <label>Порог разрыва <input id="tearAt" type="range" min="10" max="150" value="45"> <b class="val" id="v-tearAt"></b></label>
     <label>Ядро <select id="backend"><option value="js">JS</option><option value="scalar">WASM</option><option value="simd">WASM SIMD</option></select></label>
     <button id="reset">Сброс</button>
