@@ -134,7 +134,7 @@ static i32 G_nth = 1;
 static f64 G_smax[16];
 
 #ifdef USE_THREADS
-static const i32 PAR_MIN_GROUPS = 48, PAR_MIN_TRIS = 4096, SPIN_LIMIT = 40000;
+static const i32 PAR_MIN_GROUPS = 48, PAR_MIN_TRIS = 4096, SPIN_LIMIT = 20000;
 static inline bool parOn() { return G_nth > 1; }
 
 // Динамическое распределение: потоки берут куски по очереди (атомарный счётчик G_next), поэтому медленные ядра
@@ -180,11 +180,13 @@ EXPORT("worker_loop") void worker_loop(i32 tid) {
     i32 g, spins = 0;
     while ((g = __atomic_load_n(&G_gen, __ATOMIC_SEQ_CST)) == seen) {
       if (__atomic_load_n(&G_quit, __ATOMIC_SEQ_CST)) return;
-      if (++spins > SPIN_LIMIT) {
+      // лишние потоки (tid >= G_nth) и потоки, которым долго не дают работы, спят до уведомления:
+      // иначе они крутятся в цикле, отнимают ядра у главного потока и греют телефон
+      if (tid >= G_nth || ++spins > SPIN_LIMIT) {
         __atomic_add_fetch(&G_sleepers, 1, __ATOMIC_SEQ_CST);
-        __builtin_wasm_memory_atomic_wait32(&G_gen, seen, 2000000); // не дольше 2 мс: проверяем G_quit
+        __builtin_wasm_memory_atomic_wait32(&G_gen, seen, -1);
         __atomic_sub_fetch(&G_sleepers, 1, __ATOMIC_SEQ_CST);
-        spins = 0;
+        spins = SPIN_LIMIT; // после пробуждения без новой работы сразу снова спим
       }
     }
     seen = g;

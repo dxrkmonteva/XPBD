@@ -103,6 +103,25 @@ build();
 if (!simdSupported()) $('backend').querySelector('option[value=simd]').disabled = true;
 { const hc = navigator.hardwareConcurrency || 4; $('thr').max = Math.max(1, Math.min(8, hc)); $('thr').value = Math.max(1, Math.min(4, hc >> 1)); }
 if (!simdSupported() || !mtSupported()) $('backend').querySelector('option[value=mt]').disabled = true;
+// Автоподбор: по очереди пробуем 1…N потоков, меряем реальное время шага, оставляем лучший
+let tuning = false;
+$('autothr').addEventListener('click', async () => {
+  if (tuning || !sim.mt) return;
+  tuning = true; $('autothr').disabled = true;
+  const hc = navigator.hardwareConcurrency || 4, cand = [1, 2, 3, 4, 6, 8].filter(t => t <= Math.min(8, hc));
+  let best = 1, bestMs = Infinity;
+  for (const t of cand) {
+    await sim.setThreads(t); $('thr').value = t; applyControls();
+    await new Promise(r => setTimeout(r, 600)); // прогрев
+    tune.sum = 0; tune.n = 0;
+    await new Promise(r => setTimeout(r, 1500));
+    const ms = tune.n ? tune.sum / tune.n : Infinity;
+    $('autothr').textContent = `подбор… ${t}: ${ms.toFixed(1)} мс`;
+    if (ms < bestMs * 0.97) { bestMs = ms; best = t; } // 3% запас: при равенстве берём меньше потоков
+  }
+  await sim.setThreads(best); $('thr').value = best; applyControls();
+  $('autothr').textContent = `лучшее: ${best} (${bestMs.toFixed(1)} мс)`; $('autothr').disabled = false; tuning = false;
+});
 $('thr').addEventListener('change', async () => { if (sim.setThreads && sim.mt) await sim.setThreads(+$('thr').value); });
 $('backend').addEventListener('change', () => setBackend($('backend').value));
 setBackend(simdSupported() ? (mtSupported() ? 'mt' : 'simd') : 'scalar'); // по умолчанию самое быстрое ядро
@@ -240,11 +259,12 @@ function draw() {
 
 // --- главный цикл: фиксированный шаг 60 Гц ---
 let last = performance.now(), acc = 0;
+const tune = { sum: 0, n: 0 }; // накопитель времени шага для автоподбора потоков
 const DT = 1 / 60;
 function frame(now) {
   acc += Math.min(0.1, (now - last) / 1000);
   last = now;
-  while (acc >= DT) { moveDrag(DT); const t0 = performance.now(); sim.step(DT); sim.stepMs = sim.stepMs * 0.95 + (performance.now() - t0) * 0.05; acc -= DT; }
+  while (acc >= DT) { moveDrag(DT); const t0 = performance.now(); sim.step(DT); const dtm = performance.now() - t0; sim.stepMs = sim.stepMs * 0.95 + dtm * 0.05; tune.sum += dtm; tune.n++; acc -= DT; }
   draw();
   $('info').textContent = `ядро: ${$('backend').value}${sim.mt ? '×' + sim.threads : ''} · ${sim.stepMs.toFixed(2)} мс/кадр · частиц: ${sim.n} · кусков: ${sim.pieces} · трещин: ${sim.splits} · контактов: ${sim.contacts} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
   requestAnimationFrame(frame);
