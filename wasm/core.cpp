@@ -133,12 +133,26 @@ static void femSolveScalar(f64 h) {
 // обрабатывают свои доли; главный поток тоже работает (доля 0) и ждёт счётчик G_done. Элементы одного цвета не делят
 // вершин, поэтому записи потоков не пересекаются. Главный поток в браузере не может блокироваться — он только
 // крутится в цикле ожидания; рабочие после паузы засыпают (atomic.wait), чтобы не греть процессор между кадрами.
-enum { JOB_FEM = 1, JOB_STRESS = 2 };
+enum { JOB_FEM = 1, JOB_STRESS = 2, JOB_BENCH = 3 };
 __attribute__((unused)) static void femColorRange(i32 col, i32 g0, i32 g1);
 static f64 stressRange(i32 t0, i32 t1);
-__attribute__((unused)) static i32 G_gen, G_done, G_quit, G_sleepers, G_kind, G_col, G_ng;
-static i32 G_nth = 1;
-static f64 G_smax[16];
+// Каждая «горячая» переменная — в своей кэш-линии (128 байт): иначе рабочие, крутящиеся на чтении G_gen, и атомарные
+// операции над счётчиками (G_next, G_done) гоняют одну линию между ядрами (false sharing) и съедают весь выигрыш потоков.
+struct alignas(128) PadI { i32 v; };
+#define UNUSED __attribute__((unused))
+UNUSED static PadI pGen, pDone, pNext, pSleep, pQuit, pNth = {1};
+struct alignas(128) JobParams { i32 kind, col, ng, bench; };
+UNUSED static JobParams JOB;
+#define G_gen (pGen.v)
+#define G_done (pDone.v)
+#define G_next (pNext.v)
+#define G_sleepers (pSleep.v)
+#define G_quit (pQuit.v)
+#define G_nth (pNth.v)
+#define G_kind (JOB.kind)
+#define G_col (JOB.col)
+#define G_ng (JOB.ng)
+alignas(128) static f64 G_smax[32]; // по 16 слотов (128 байт) на поток не нужно: пишется один раз за задачу
 
 #ifdef USE_THREADS
 static const i32 PAR_MIN_GROUPS = 48, PAR_MIN_TRIS = 4096, SPIN_LIMIT = 20000;
@@ -146,17 +160,18 @@ static inline bool parOn() { return G_nth > 1; }
 
 // Динамическое распределение: потоки берут куски по очереди (атомарный счётчик G_next), поэтому медленные ядра
 // (big.LITTLE на телефонах) не тормозят остальные — просто делают меньше кусков.
-static i32 G_next;
-static void runSlice(i32 kind, i32 tid, i32 /*nth*/) {
+static f64 benchWork(i32 iters) { f64 a = 1.0001, b = 0.5; for (i32 i = 0; i < iters; i++) { a = a * 1.0000001 + b; b = b * 0.9999999 + 1e-9 * a; } return a + b; }
+static void runSlice(i32 kind, i32 tid, i32 nth) {
+  if (kind == JOB_BENCH) { G_smax[tid] = benchWork(JOB.bench); return; }
   if (kind == JOB_FEM) {
-    const i32 CH = 16;
+    const i32 CH = G_ng / (nth * 6) > 4 ? G_ng / (nth * 6) : 4; // ~6 кусков на поток: баланс между синхронизацией и неравномерностью ядер
     for (;;) {
       const i32 lo = __atomic_fetch_add(&G_next, CH, __ATOMIC_SEQ_CST);
       if (lo >= G_ng) break;
       femColorRange(G_col, lo, lo + CH < G_ng ? lo + CH : G_ng);
     }
   } else if (kind == JOB_STRESS) {
-    const i32 CH = 512; f64 sm = 0;
+    const i32 CH = C.T / (nth * 6) > 256 ? C.T / (nth * 6) : 256; f64 sm = 0;
     for (;;) {
       const i32 lo = __atomic_fetch_add(&G_next, CH, __ATOMIC_SEQ_CST);
       if (lo >= C.T) break;
@@ -179,6 +194,11 @@ static void par(i32 kind) {
 }
 
 extern "C" {
+EXPORT("bench_threads") f64 bench_threads(i32 iters) { // тест параллелизма: каждый активный поток делает одну и ту же работу
+  JOB.bench = iters;
+  if (G_nth > 1) par(JOB_BENCH); else runSlice(JOB_BENCH, 0, 1);
+  return G_smax[0];
+}
 EXPORT("set_threads") void set_threads(i32 n) { G_nth = n < 1 ? 1 : (n > 16 ? 16 : n); G_quit = 0; }
 EXPORT("stop_workers") void stop_workers() { __atomic_store_n(&G_quit, 1, __ATOMIC_SEQ_CST); __builtin_wasm_memory_atomic_notify(&G_gen, 1000); }
 EXPORT("worker_loop") void worker_loop(i32 tid) {

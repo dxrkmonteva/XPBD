@@ -103,6 +103,26 @@ build();
 if (!simdSupported()) $('backend').querySelector('option[value=simd]').disabled = true;
 { const hc = navigator.hardwareConcurrency || 4; $('thr').max = Math.max(1, Math.min(8, hc)); $('thr').value = Math.max(1, Math.min(4, hc >> 1)); }
 if (!simdSupported() || !mtSupported()) $('backend').querySelector('option[value=mt]').disabled = true;
+// Тест параллелизма: каждый поток считает одно и то же без общих данных. Если время растёт с числом потоков —
+// ядра реально не работают параллельно (большие/малые ядра, режим энергосбережения), и дело не в нашей синхронизации.
+$('thrtest').addEventListener('click', async () => {
+  if (!sim.mt) return;
+  const btn = $('thrtest'); btn.disabled = true;
+  const hc = navigator.hardwareConcurrency || 4, out = [];
+  await sim.setThreads(1);
+  let iters = 2e6, ms = sim.benchThreads(iters); // калибровка: 1 поток ≈ 80 мс
+  iters = Math.round(iters * 80 / Math.max(ms, 1));
+  for (let t = 1; t <= Math.min(8, hc); t++) {
+    await sim.setThreads(t);
+    sim.benchThreads(iters / 8); // прогрев/разбудить воркеры
+    const a = [1, 2, 3].map(() => sim.benchThreads(iters)).sort((p, q) => p - q)[1];
+    out.push(`${t}: ${a.toFixed(0)}`);
+    $('thrres').textContent = 'мс на поток → ' + out.join(' · ');
+  }
+  await sim.setThreads(+$('thr').value);
+  btn.disabled = false;
+});
+
 // Автоподбор: по очереди пробуем 1…N потоков, меряем реальное время шага, оставляем лучший
 let tuning = false;
 $('autothr').addEventListener('click', async () => {

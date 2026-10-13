@@ -186,6 +186,14 @@ export class WasmSim extends Sim {
     return n;
   }
 
+  // Тест параллелизма «железа»: каждый поток выполняет одинаковую вычислительную работу без общих данных.
+  // Идеал — время не растёт с числом потоков. Возвращает мс.
+  benchThreads(iters) {
+    if (!this.mt) return 0;
+    this.ex.set_threads(this.threads);
+    const t0 = performance.now(); this.ex.bench_threads(iters); return performance.now() - t0;
+  }
+
   stopThreads() {
     if (!this.mt) return;
     this.ex.stop_workers();
