@@ -266,7 +266,7 @@ function frame(now) {
   last = now;
   while (acc >= DT) { moveDrag(DT); const t0 = performance.now(); sim.step(DT); const dtm = performance.now() - t0; sim.stepMs = sim.stepMs * 0.95 + dtm * 0.05; tune.sum += dtm; tune.n++; acc -= DT; }
   draw();
-  $('info').textContent = `ядро: ${$('backend').value}${sim.mt ? '×' + sim.threads : ''} · ${sim.stepMs.toFixed(2)} мс/кадр · частиц: ${sim.n} · кусков: ${sim.pieces} · трещин: ${sim.splits} · контактов: ${sim.contacts} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
+  $('info').textContent = `ядро: ${$('backend').value}${sim.mt ? '×' + sim.threads : ''} · ${sim.stepMs.toFixed(2)} мс/кадр${sim.prof ? ` [FEM ${sim.prof.fem.toFixed(1)} · напр. ${sim.prof.stress.toFixed(1)} · подгот. ${sim.prof.prep.toFixed(1)}]` : ''} · частиц: ${sim.n} · кусков: ${sim.pieces} · трещин: ${sim.splits} · контактов: ${sim.contacts} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

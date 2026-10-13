@@ -19,7 +19,7 @@ typedef double f64;
 #define EXPORT(name) __attribute__((export_name(name)))
 
 // ---------- параметры (f64) ----------
-enum { P_GRAV, P_COMPL, P_ACOMPL, P_DAMP, P_YOUNG, P_NU, P_TEARSTRAIN, P_BW, P_BH, P_FRIC, P_CELL, P_SMAX, P_VMAX, P_COUNT = 32 }; // P_SMAX — выход: макс. напряжение
+enum { P_GRAV, P_COMPL, P_ACOMPL, P_DAMP, P_YOUNG, P_NU, P_TEARSTRAIN, P_BW, P_BH, P_FRIC, P_CELL, P_SMAX, P_VMAX, P_T0, P_T1, P_T2, P_COUNT = 32 }; // P_SMAX — выход: макс. напряжение
 // ---------- целые параметры и указатели ----------
 enum {
   Q_N, Q_T, Q_M, Q_CAP, Q_SUBSTEPS, Q_FEM, Q_AREA, Q_COLLIDE, Q_TEAR, Q_CUT, Q_PIECES, Q_CONTACTS,
@@ -29,6 +29,13 @@ enum {
   Q_BSTART, Q_BCOUNT, Q_CORDER, Q_CSTART, Q_CMASK, Q_ORD, Q_TP, Q_DIRTY, Q_COUNT = 64
 };
 
+#ifdef USE_THREADS
+// профилировщик: часы из JS (performance.now); только в многопоточной сборке и только в главном потоке
+extern "C" __attribute__((import_module("env"), import_name("now"))) f64 js_now();
+#define T_NOW() js_now()
+#else
+#define T_NOW() 0.0
+#endif
 static f64 P[P_COUNT];
 static i32 Q[Q_COUNT];
 
@@ -517,8 +524,10 @@ EXPORT("step") void step(f64 dt) {
   const f64 maxX = P[P_BW] - 2, maxY = P[P_BH] - 2;
   const f64 grav = P[P_GRAV], damp = P[P_DAMP];
   Q[Q_CONTACTS] = 0;
+  f64 tPrep = 0, tFem = 0, tStress = 0, tm = T_NOW();
 #ifdef USE_SIMD
   if (fem && Q[Q_NCOLORS] > 0) prepareColored();
+  tPrep = T_NOW() - tm;
 #endif
 
   for (i32 s = 0; s < substeps; s++) {
@@ -550,10 +559,12 @@ EXPORT("step") void step(f64 dt) {
     }
     // 2б. FEM (M3) или площадь (M2)
     if (fem) {
+      tm = T_NOW();
 #ifdef USE_SIMD
       if (Q[Q_NCOLORS] > 0) femSolveColored(h); else
 #endif
       femSolveScalar(h);
+      tFem += T_NOW() - tm;
     } else if (Q[Q_AREA]) {
       const f64 aAlpha = P[P_ACOMPL] / (h * h);
       for (i32 t = 0; t < C.T; t++) {
@@ -608,6 +619,9 @@ EXPORT("step") void step(f64 dt) {
     C.strain[e] = (f32)st;
     if (!fem && tear && len > C.rest[e] && st > P[P_TEARSTRAIN]) C.alive[e] = 0;
   }
+  tm = T_NOW();
   if (fem) updateStress();
+  tStress = T_NOW() - tm;
+  P[P_T0] = tPrep; P[P_T1] = tFem; P[P_T2] = tStress;
 }
 }
