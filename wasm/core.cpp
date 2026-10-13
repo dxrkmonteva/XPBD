@@ -631,7 +631,8 @@ EXPORT("step") void step(f64 dt) {
   }
   // деформация рёбер (раскраска / разрыв без FEM) — раз за кадр
   const bool tear = Q[Q_TEAR] != 0;
-  for (i32 e = 0; e < m; e++) {
+  // в режиме FEM деформация рёбер не используется (раскраска и разрыв идут по напряжению элементов) — пропускаем цикл
+  for (i32 e = 0; e < (fem ? 0 : m); e++) {
     if (!C.alive[e]) { C.strain[e] = 0; continue; }
     const i32 a = C.edges[e * 2], b = C.edges[e * 2 + 1];
     const f64 len = hyp(x[a * 2] - x[b * 2], x[a * 2 + 1] - x[b * 2 + 1]);
