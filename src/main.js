@@ -102,7 +102,7 @@ $('reset').addEventListener('click', build);
 applyControls();
 build();
 if (!simdSupported()) $('backend').querySelector('option[value=simd]').disabled = true;
-{ const hc = navigator.hardwareConcurrency || 4; $('thr').max = Math.max(1, Math.min(8, hc)); $('thr').value = 2; }
+{ const hc = navigator.hardwareConcurrency || 4; $('thr').max = Math.max(1, Math.min(8, hc)); $('thr').value = 1; }
 // по умолчанию 2 потока (типичный телефон: 2 быстрых ядра + слабые); точнее поможет «Подобрать потоки»
 if (!simdSupported() || !mtSupported()) $('backend').querySelector('option[value=mt]').disabled = true;
 // Тест параллелизма: каждый поток считает одно и то же без общих данных. Если время растёт с числом потоков —
