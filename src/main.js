@@ -74,6 +74,7 @@ function applyControls() {
   sim.tearStrain = +$('tearAt').value / 100;
   sim.substeps = +$('sub').value;
   sim.adaptive = $('adapt').checked;
+  sim.staticSched = $('stat').checked;
   sim.adaptK = 0.15; sim.adaptMin = 8; // авто: от 8 подшагов в покое до заданного числа при ударе
   showValues();
 }
@@ -93,7 +94,7 @@ function showValues() {
   set('sub', $('sub').value, $('adapt').checked ? 'авто ≤' : '');
   set('tearAt', $('tearAt').value, sim.femEnabled ? '% от E' : '% удл.');
 }
-['sub', 'adapt', 'soft', 'softA', 'area', 'young', 'nu', 'grav', 'tear', 'cut', 'collide', 'tearAt', 'detail'].forEach(id => $(id).addEventListener('input', applyControls));
+['sub', 'adapt', 'stat', 'soft', 'softA', 'area', 'young', 'nu', 'grav', 'tear', 'cut', 'collide', 'tearAt', 'detail'].forEach(id => $(id).addEventListener('input', applyControls));
 $('detail').addEventListener('change', () => { $('sub').value = Math.min(20, 9 + +$('detail').value); applyControls(); build(); }); // мельче сетка → по умолчанию больше подшагов // пересборка сетки при отпускании ползунка
 $('fem').addEventListener('change', () => { applyControls(); build(); });
 $('pin').addEventListener('change', build);
@@ -287,7 +288,7 @@ function frame(now) {
   last = now;
   while (acc >= DT) { moveDrag(DT); const t0 = performance.now(); sim.step(DT); const dtm = performance.now() - t0; sim.stepMs = sim.stepMs * 0.95 + dtm * 0.05; tune.sum += dtm; tune.n++; acc -= DT; }
   draw();
-  $('info').textContent = `ядро: ${$('backend').value}${sim.mt ? '×' + sim.threads : ''} · ${sim.stepMs.toFixed(2)} мс/кадр${sim.prof ? ` [FEM ${sim.prof.fem.toFixed(1)} · напр. ${sim.prof.stress.toFixed(1)} · подгот. ${sim.prof.prep.toFixed(1)}]` : ''} · частиц: ${sim.n} · кусков: ${sim.pieces} · трещин: ${sim.splits} · контактов: ${sim.contacts} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
+  $('info').textContent = `ядро: ${$('backend').value}${sim.mt ? '×' + sim.threads : ''} · ${sim.stepMs.toFixed(2)} мс/кадр${sim.prof ? ` [потоки мс: ${sim.prof.busy.map(b => b.toFixed(1)).join('/')}] [FEM ${sim.prof.fem.toFixed(1)} · напр. ${sim.prof.stress.toFixed(1)} · подгот. ${sim.prof.prep.toFixed(1)}]` : ''} · частиц: ${sim.n} · кусков: ${sim.pieces} · трещин: ${sim.splits} · контактов: ${sim.contacts} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

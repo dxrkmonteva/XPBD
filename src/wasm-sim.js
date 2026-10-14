@@ -203,7 +203,7 @@ export class WasmSim extends Sim {
 
   step(dt) {
     if (!this.bound) return;
-    if (this.mt) this.ex.set_threads(this.threads);
+    if (this.mt) { this.ex.set_threads(this.threads); this.ex.set_sched(this.staticSched ? 1 : 0); this.ex.busy_reset(); }
     const t0 = performance.now();
     if (this._gridCells() > this.gridCap) this._bind(this._gridCells() * 2); // окно выросло — пересоздаём сетку
     const P_ = this.P, Q_ = this.Q;
@@ -217,7 +217,7 @@ export class WasmSim extends Sim {
     this.ex.step(dt);
     this.contacts = Q_[Q.CONTACTS];
     this.vmax = P_[P.VMAX];
-    this.prof = this.mt ? { prep: P_[P.T0], fem: P_[P.T1], stress: P_[P.T2] } : null; // мс по фазам (многопоточная сборка)
+    this.prof = this.mt ? { prep: P_[P.T0], fem: P_[P.T1], stress: P_[P.T2], busy: Array.from({ length: this.threads }, (_, i) => this.ex.busy_get(i)) } : null; // мс по фазам (многопоточная сборка)
     // cutStep дорогой (O(T) на JS): пропускаем, если ни один элемент не достиг прочности (осреднённое по вершине
     // главное напряжение не может превысить максимум по элементам)
     if (this.femEnabled && this.tearEnabled && this.cutEnabled && P_[P.SMAX] > this.tearStrain * this.young) this.cutStep(this.tearStrain * this.young);

@@ -150,6 +150,10 @@ UNUSED static JobParams JOB;
 #define G_quit (pQuit.v)
 #define G_nth (pNth.v)
 #define G_kind (JOB.kind)
+UNUSED static PadI pSched; // 0 — динамические куски, 1 — статическое разделение (по непрерывному блоку на поток)
+#define G_sched (pSched.v)
+struct alignas(128) PadD { f64 v; };
+UNUSED static PadD G_busy[16]; // накопленное время работы каждого потока за кадр (мс), для диагностики
 #define G_col (JOB.col)
 #define G_ng (JOB.ng)
 alignas(128) static f64 G_smax[32]; // по 16 слотов (128 байт) на поток не нужно: пишется один раз за задачу
@@ -161,9 +165,18 @@ static inline bool parOn() { return G_nth > 1; }
 // Динамическое распределение: потоки берут куски по очереди (атомарный счётчик G_next), поэтому медленные ядра
 // (big.LITTLE на телефонах) не тормозят остальные — просто делают меньше кусков.
 static f64 benchWork(i32 iters) { f64 a = 1.0001, b = 0.5; for (i32 i = 0; i < iters; i++) { a = a * 1.0000001 + b; b = b * 0.9999999 + 1e-9 * a; } return a + b; }
+static void runSliceImpl(i32 kind, i32 tid, i32 nth);
 static void runSlice(i32 kind, i32 tid, i32 nth) {
+  const f64 t0 = T_NOW();
+  runSliceImpl(kind, tid, nth);
+  G_busy[tid].v += T_NOW() - t0;
+}
+static void runSliceImpl(i32 kind, i32 tid, i32 nth) {
   if (kind == JOB_BENCH) { G_smax[tid] = benchWork(JOB.bench); return; }
-  if (kind == JOB_FEM) {
+  if (kind == JOB_FEM && G_sched == 1) {
+    const i32 g0 = (i32)((long long)G_ng * tid / nth), g1 = (i32)((long long)G_ng * (tid + 1) / nth);
+    if (g1 > g0) femColorRange(G_col, g0, g1);
+  } else if (kind == JOB_FEM) {
     const i32 CH = G_ng / (nth * 6) > 4 ? G_ng / (nth * 6) : 4; // ~6 кусков на поток: баланс между синхронизацией и неравномерностью ядер
     for (;;) {
       const i32 lo = __atomic_fetch_add(&G_next, CH, __ATOMIC_SEQ_CST);
@@ -199,6 +212,9 @@ EXPORT("bench_threads") f64 bench_threads(i32 iters) { // тест паралл�
   if (G_nth > 1) par(JOB_BENCH); else runSlice(JOB_BENCH, 0, 1);
   return G_smax[0];
 }
+EXPORT("set_sched") void set_sched(i32 m) { G_sched = m; }
+EXPORT("busy_reset") void busy_reset() { for (i32 i = 0; i < 16; i++) G_busy[i].v = 0; }
+EXPORT("busy_get") f64 busy_get(i32 i) { return G_busy[i & 15].v; }
 EXPORT("set_threads") void set_threads(i32 n) { G_nth = n < 1 ? 1 : (n > 16 ? 16 : n); G_quit = 0; }
 EXPORT("stop_workers") void stop_workers() { __atomic_store_n(&G_quit, 1, __ATOMIC_SEQ_CST); __builtin_wasm_memory_atomic_notify(&G_gen, 1000); }
 EXPORT("worker_loop") void worker_loop(i32 tid) {
