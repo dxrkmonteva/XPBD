@@ -75,7 +75,7 @@ function applyControls() {
   sim.substeps = +$('sub').value;
   sim.adaptive = $('adapt').checked;
   sim.staticSched = $('stat').checked;
-  sim.adaptK = 0.15; sim.adaptMin = 8; // авто: от 8 подшагов в покое до заданного числа при ударе
+  sim.adaptK = 0.3; sim.adaptMin = 8; sim.adaptMax = 64; // авто: ≥8 в покое, перед ударом до 64 (шаг ≤ 0.3 шага сетки)
   showValues();
 }
 

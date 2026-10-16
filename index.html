@@ -34,7 +34,7 @@
     <label>Подшаги <input id="sub" type="range" min="4" max="30" value="10"> <b class="val" id="v-sub"></b></label>
     <label id="thr-l">Потоки <input id="thr" type="range" min="1" max="8" value="4"> <b class="val" id="v-thr"></b></label> <button id="autothr">Подобрать потоки</button> <button id="thrtest">Тест потоков</button> <span id="thrres"></span>
     <label><input id="stat" type="checkbox"> Статическое разделение потоков</label>
-    <label><input id="adapt" type="checkbox"> Авто-подшаги</label>
+    <label><input id="adapt" type="checkbox" checked> Авто-подшаги (до 64 перед ударом)</label>
     <label>Детализация <input id="detail" type="range" min="1" max="12" value="1"> <b class="val" id="v-detail"></b></label>
     <label>Порог разрыва <input id="tearAt" type="range" min="10" max="150" value="45"> <b class="val" id="v-tearAt"></b></label>
     <label>Ядро <select id="backend"><option value="js">JS</option><option value="scalar">WASM</option><option value="simd">WASM SIMD</option><option value="mt">WASM SIMD + потоки</option></select></label>

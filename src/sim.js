@@ -77,6 +77,16 @@ export class Sim {
     return k;
   }
 
+  // Сосредоточенные массы: w = 1/(ρ·A_v), A_v — треть суммарной площади элементов вокруг вершины. Закреплённые (w=0) не трогаем.
+  lumpMass(rho) {
+    const area = new Float64Array(this.n), T = this.restArea.length;
+    for (let t = 0; t < T; t++) {
+      const a = Math.abs(this.restArea[t]) / 3;
+      area[this.tris[t * 3]] += a; area[this.tris[t * 3 + 1]] += a; area[this.tris[t * 3 + 2]] += a;
+    }
+    for (let i = 0; i < this.n; i++) if (this.w[i] > 0 && area[i] > 0) this.w[i] = 1 / (rho * area[i]);
+  }
+
   // Прямоугольная плита из nx*ny ячеек, каждая — 2 треугольника (диагонали чередуются)
   buildSlab(nx, ny, spacing, ox, oy, pinLeft) {
     this.clear();
@@ -121,6 +131,11 @@ export class Sim {
     this.triEdges = Int32Array.from(triEdges);
     this.restArea = new Float64Array(tris.length / 3);
     for (let t = 0; t < this.restArea.length; t++) this.restArea[t] = this.signedArea(t);
+
+    // M7.2: масса вершины = плотность × (сумма площадей соседних элементов)/3. Раньше у каждой вершины была масса 1,
+    // и при росте детализации тело становилось в k² раз плотнее (скорость звука падала в k раз → удар «сверхзвуковой»).
+    // Плотность подобрана так, чтобы внутренняя вершина при шаге 18 px весила 1, как прежде.
+    this.lumpMass(1 / (18 * 18));
 
     // M3: Dm = [X1-X0 | X2-X0], храним Dm^-1
     const T = this.restArea.length;
@@ -533,13 +548,35 @@ export class Sim {
     return best;
   }
 
-  // Сколько подшагов нужно в этом кадре: вершина не должна проходить за подшаг больше ~⅓ шага сетки.
-  // В покое хватает 4 подшагов, при ударе — полное число. Скорость берётся из прошлого кадра.
+  // Сколько подшагов нужно в этом кадре (M7.2). Решатель за подшаг «передаёт» поправку только на один элемент, поэтому
+  // вершина не должна проходить за подшаг больше ~0.4 шага сетки, иначе при ударе тело вминается само в себя и элементы
+  // выворачиваются. Но такая скорость опасна только рядом с препятствием, поэтому лишние подшаги включаются, когда
+  // какая-то вершина долетит до пола/стены в течение ближайших ~2 кадров (или при контактах между кусками).
+  // slider substeps — число подшагов «в покое», adaptMax — потолок при ударе. Скорость берётся из прошлого кадра.
   effSubsteps(dt) {
     const S = this.substeps;
     if (!this.adaptive || !this.spacing) return S;
-    const need = Math.ceil(dt * this.vmax / ((this.adaptK || 0.35) * this.spacing));
-    return Math.max(Math.min(this.adaptMin || 4, S), Math.min(S, need));
+    const n = this.n, x = this.x, v = this.v, w = this.w;
+    const maxX = this.bounds.w - 2, maxY = this.bounds.h - 2, g = this.gravity * dt;
+    let vmax2 = 0, tHit = Infinity;
+    for (let i = 0; i < n; i++) {
+      if (w[i] === 0) continue;
+      const vx = v[i * 2], vy = v[i * 2 + 1] + g, q = vx * vx + vy * vy;
+      if (q > vmax2) vmax2 = q;
+      if (vy > 1e-6) { const t = (maxY - x[i * 2 + 1]) / vy; if (t < tHit) tHit = t; }
+      if (vx > 1e-6) { const t = (maxX - x[i * 2]) / vx; if (t < tHit) tHit = t; }
+      else if (vx < -1e-6) { const t = (x[i * 2] - 2) / -vx; if (t < tHit) tHit = t; }
+    }
+    const pieceContacts = this.collideEnabled && this.pieces > 1;
+    const lo = Math.min(this.adaptMin || 8, S);
+    const need = Math.ceil(dt * Math.sqrt(vmax2) / ((this.adaptK || 0.3) * this.spacing));
+    let out;
+    if (tHit > 2 * dt && !pieceContacts) out = Math.max(lo, Math.min(S, need)); // далеко от препятствий: не больше заданного
+    else out = Math.max(lo, S, Math.min(this.adaptMax || 64, need));            // удар близко: сколько нужно, до потолка
+    // после удара держим повышенное число подшагов ещё несколько кадров: волна сжатия ещё бежит по телу
+    if (out > S) { this._hold = this.adaptHold === undefined ? 4 : this.adaptHold; this._holdS = out; }
+    else if (this._hold > 0) { this._hold--; out = Math.max(out, this._holdS); }
+    return out;
   }
 
   step(dt) {
