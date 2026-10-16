@@ -19,7 +19,7 @@ typedef double f64;
 #define EXPORT(name) __attribute__((export_name(name)))
 
 // ---------- параметры (f64) ----------
-enum { P_GRAV, P_COMPL, P_ACOMPL, P_DAMP, P_YOUNG, P_NU, P_TEARSTRAIN, P_BW, P_BH, P_FRIC, P_CELL, P_SMAX, P_VMAX, P_COUNT = 32 }; // P_SMAX — выход: макс. напряжение
+enum { P_GRAV, P_COMPL, P_ACOMPL, P_DAMP, P_YOUNG, P_NU, P_TEARSTRAIN, P_BW, P_BH, P_FRIC, P_CELL, P_SMAX, P_VMAX, P_T0, P_T1, P_T2, P_COUNT = 32 }; // P_SMAX — выход: макс. напряжение
 // ---------- целые параметры и указатели ----------
 enum {
   Q_N, Q_T, Q_M, Q_CAP, Q_SUBSTEPS, Q_FEM, Q_AREA, Q_COLLIDE, Q_TEAR, Q_CUT, Q_PIECES, Q_CONTACTS,
@@ -29,6 +29,13 @@ enum {
   Q_BSTART, Q_BCOUNT, Q_CORDER, Q_CSTART, Q_CMASK, Q_ORD, Q_TP, Q_DIRTY, Q_COUNT = 64
 };
 
+#ifdef USE_THREADS
+// профилировщик: часы из JS (performance.now); только в многопоточной сборке и только в главном потоке
+extern "C" __attribute__((import_module("env"), import_name("now"))) f64 js_now();
+#define T_NOW() js_now()
+#else
+#define T_NOW() 0.0
+#endif
 static f64 P[P_COUNT];
 static i32 Q[Q_COUNT];
 
@@ -126,30 +133,58 @@ static void femSolveScalar(f64 h) {
 // обрабатывают свои доли; главный поток тоже работает (доля 0) и ждёт счётчик G_done. Элементы одного цвета не делят
 // вершин, поэтому записи потоков не пересекаются. Главный поток в браузере не может блокироваться — он только
 // крутится в цикле ожидания; рабочие после паузы засыпают (atomic.wait), чтобы не греть процессор между кадрами.
-enum { JOB_FEM = 1, JOB_STRESS = 2 };
+enum { JOB_FEM = 1, JOB_STRESS = 2, JOB_BENCH = 3 };
 __attribute__((unused)) static void femColorRange(i32 col, i32 g0, i32 g1);
 static f64 stressRange(i32 t0, i32 t1);
-__attribute__((unused)) static i32 G_gen, G_done, G_quit, G_sleepers, G_kind, G_col, G_ng;
-static i32 G_nth = 1;
-static f64 G_smax[16];
+// Каждая «горячая» переменная — в своей кэш-линии (128 байт): иначе рабочие, крутящиеся на чтении G_gen, и атомарные
+// операции над счётчиками (G_next, G_done) гоняют одну линию между ядрами (false sharing) и съедают весь выигрыш потоков.
+struct alignas(128) PadI { i32 v; };
+#define UNUSED __attribute__((unused))
+UNUSED static PadI pGen, pDone, pNext, pSleep, pQuit, pNth = {1};
+struct alignas(128) JobParams { i32 kind, col, ng, bench; };
+UNUSED static JobParams JOB;
+#define G_gen (pGen.v)
+#define G_done (pDone.v)
+#define G_next (pNext.v)
+#define G_sleepers (pSleep.v)
+#define G_quit (pQuit.v)
+#define G_nth (pNth.v)
+#define G_kind (JOB.kind)
+UNUSED static PadI pSched; // 0 — динамические куски, 1 — статическое разделение (по непрерывному блоку на поток)
+#define G_sched (pSched.v)
+struct alignas(128) PadD { f64 v; };
+UNUSED static PadD G_busy[16]; // накопленное время работы каждого потока за кадр (мс), для диагностики
+#define G_col (JOB.col)
+#define G_ng (JOB.ng)
+alignas(128) static f64 G_smax[32]; // по 16 слотов (128 байт) на поток не нужно: пишется один раз за задачу
 
 #ifdef USE_THREADS
-static const i32 PAR_MIN_GROUPS = 48, PAR_MIN_TRIS = 4096, SPIN_LIMIT = 40000;
+static const i32 PAR_MIN_GROUPS = 48, PAR_MIN_TRIS = 4096, SPIN_LIMIT = 20000;
 static inline bool parOn() { return G_nth > 1; }
 
 // Динамическое распределение: потоки берут куски по очереди (атомарный счётчик G_next), поэтому медленные ядра
 // (big.LITTLE на телефонах) не тормозят остальные — просто делают меньше кусков.
-static i32 G_next;
-static void runSlice(i32 kind, i32 tid, i32 /*nth*/) {
-  if (kind == JOB_FEM) {
-    const i32 CH = 16;
+static f64 benchWork(i32 iters) { f64 a = 1.0001, b = 0.5; for (i32 i = 0; i < iters; i++) { a = a * 1.0000001 + b; b = b * 0.9999999 + 1e-9 * a; } return a + b; }
+static void runSliceImpl(i32 kind, i32 tid, i32 nth);
+static void runSlice(i32 kind, i32 tid, i32 nth) {
+  const f64 t0 = T_NOW();
+  runSliceImpl(kind, tid, nth);
+  G_busy[tid].v += T_NOW() - t0;
+}
+static void runSliceImpl(i32 kind, i32 tid, i32 nth) {
+  if (kind == JOB_BENCH) { G_smax[tid] = benchWork(JOB.bench); return; }
+  if (kind == JOB_FEM && G_sched == 1) {
+    const i32 g0 = (i32)((long long)G_ng * tid / nth), g1 = (i32)((long long)G_ng * (tid + 1) / nth);
+    if (g1 > g0) femColorRange(G_col, g0, g1);
+  } else if (kind == JOB_FEM) {
+    const i32 CH = G_ng / (nth * 6) > 4 ? G_ng / (nth * 6) : 4; // ~6 кусков на поток: баланс между синхронизацией и неравномерностью ядер
     for (;;) {
       const i32 lo = __atomic_fetch_add(&G_next, CH, __ATOMIC_SEQ_CST);
       if (lo >= G_ng) break;
       femColorRange(G_col, lo, lo + CH < G_ng ? lo + CH : G_ng);
     }
   } else if (kind == JOB_STRESS) {
-    const i32 CH = 512; f64 sm = 0;
+    const i32 CH = C.T / (nth * 6) > 256 ? C.T / (nth * 6) : 256; f64 sm = 0;
     for (;;) {
       const i32 lo = __atomic_fetch_add(&G_next, CH, __ATOMIC_SEQ_CST);
       if (lo >= C.T) break;
@@ -172,6 +207,14 @@ static void par(i32 kind) {
 }
 
 extern "C" {
+EXPORT("bench_threads") f64 bench_threads(i32 iters) { // тест параллелизма: каждый активный поток делает одну и ту же работу
+  JOB.bench = iters;
+  if (G_nth > 1) par(JOB_BENCH); else runSlice(JOB_BENCH, 0, 1);
+  return G_smax[0];
+}
+EXPORT("set_sched") void set_sched(i32 m) { G_sched = m; }
+EXPORT("busy_reset") void busy_reset() { for (i32 i = 0; i < 16; i++) G_busy[i].v = 0; }
+EXPORT("busy_get") f64 busy_get(i32 i) { return G_busy[i & 15].v; }
 EXPORT("set_threads") void set_threads(i32 n) { G_nth = n < 1 ? 1 : (n > 16 ? 16 : n); G_quit = 0; }
 EXPORT("stop_workers") void stop_workers() { __atomic_store_n(&G_quit, 1, __ATOMIC_SEQ_CST); __builtin_wasm_memory_atomic_notify(&G_gen, 1000); }
 EXPORT("worker_loop") void worker_loop(i32 tid) {
@@ -180,11 +223,13 @@ EXPORT("worker_loop") void worker_loop(i32 tid) {
     i32 g, spins = 0;
     while ((g = __atomic_load_n(&G_gen, __ATOMIC_SEQ_CST)) == seen) {
       if (__atomic_load_n(&G_quit, __ATOMIC_SEQ_CST)) return;
-      if (++spins > SPIN_LIMIT) {
+      // лишние потоки (tid >= G_nth) и потоки, которым долго не дают работы, спят до уведомления:
+      // иначе они крутятся в цикле, отнимают ядра у главного потока и греют телефон
+      if (tid >= G_nth || ++spins > SPIN_LIMIT) {
         __atomic_add_fetch(&G_sleepers, 1, __ATOMIC_SEQ_CST);
-        __builtin_wasm_memory_atomic_wait32(&G_gen, seen, 2000000); // не дольше 2 мс: проверяем G_quit
+        __builtin_wasm_memory_atomic_wait32(&G_gen, seen, -1);
         __atomic_sub_fetch(&G_sleepers, 1, __ATOMIC_SEQ_CST);
-        spins = 0;
+        spins = SPIN_LIMIT; // после пробуждения без новой работы сразу снова спим
       }
     }
     seen = g;
@@ -515,8 +560,10 @@ EXPORT("step") void step(f64 dt) {
   const f64 maxX = P[P_BW] - 2, maxY = P[P_BH] - 2;
   const f64 grav = P[P_GRAV], damp = P[P_DAMP];
   Q[Q_CONTACTS] = 0;
+  f64 tPrep = 0, tFem = 0, tStress = 0, tm = T_NOW();
 #ifdef USE_SIMD
   if (fem && Q[Q_NCOLORS] > 0) prepareColored();
+  tPrep = T_NOW() - tm;
 #endif
 
   for (i32 s = 0; s < substeps; s++) {
@@ -548,10 +595,12 @@ EXPORT("step") void step(f64 dt) {
     }
     // 2б. FEM (M3) или площадь (M2)
     if (fem) {
+      tm = T_NOW();
 #ifdef USE_SIMD
       if (Q[Q_NCOLORS] > 0) femSolveColored(h); else
 #endif
       femSolveScalar(h);
+      tFem += T_NOW() - tm;
     } else if (Q[Q_AREA]) {
       const f64 aAlpha = P[P_ACOMPL] / (h * h);
       for (i32 t = 0; t < C.T; t++) {
@@ -598,7 +647,8 @@ EXPORT("step") void step(f64 dt) {
   }
   // деформация рёбер (раскраска / разрыв без FEM) — раз за кадр
   const bool tear = Q[Q_TEAR] != 0;
-  for (i32 e = 0; e < m; e++) {
+  // в режиме FEM деформация рёбер не используется (раскраска и разрыв идут по напряжению элементов) — пропускаем цикл
+  for (i32 e = 0; e < (fem ? 0 : m); e++) {
     if (!C.alive[e]) { C.strain[e] = 0; continue; }
     const i32 a = C.edges[e * 2], b = C.edges[e * 2 + 1];
     const f64 len = hyp(x[a * 2] - x[b * 2], x[a * 2 + 1] - x[b * 2 + 1]);
@@ -606,6 +656,9 @@ EXPORT("step") void step(f64 dt) {
     C.strain[e] = (f32)st;
     if (!fem && tear && len > C.rest[e] && st > P[P_TEARSTRAIN]) C.alive[e] = 0;
   }
+  tm = T_NOW();
   if (fem) updateStress();
+  tStress = T_NOW() - tm;
+  P[P_T0] = tPrep; P[P_T1] = tFem; P[P_T2] = tStress;
 }
 }

@@ -74,7 +74,8 @@ function applyControls() {
   sim.tearStrain = +$('tearAt').value / 100;
   sim.substeps = +$('sub').value;
   sim.adaptive = $('adapt').checked;
-  sim.adaptK = 0.15; sim.adaptMin = 8; // авто: от 8 подшагов в покое до заданного числа при ударе
+  sim.staticSched = $('stat').checked;
+  sim.adaptK = 0.3; sim.adaptMin = 8; sim.adaptMax = 64; // авто: ≥8 в покое, перед ударом до 64 (шаг ≤ 0.3 шага сетки)
   showValues();
 }
 
@@ -93,7 +94,7 @@ function showValues() {
   set('sub', $('sub').value, $('adapt').checked ? 'авто ≤' : '');
   set('tearAt', $('tearAt').value, sim.femEnabled ? '% от E' : '% удл.');
 }
-['sub', 'adapt', 'soft', 'softA', 'area', 'young', 'nu', 'grav', 'tear', 'cut', 'collide', 'tearAt', 'detail'].forEach(id => $(id).addEventListener('input', applyControls));
+['sub', 'adapt', 'stat', 'soft', 'softA', 'area', 'young', 'nu', 'grav', 'tear', 'cut', 'collide', 'tearAt', 'detail'].forEach(id => $(id).addEventListener('input', applyControls));
 $('detail').addEventListener('change', () => { $('sub').value = Math.min(20, 9 + +$('detail').value); applyControls(); build(); }); // мельче сетка → по умолчанию больше подшагов // пересборка сетки при отпускании ползунка
 $('fem').addEventListener('change', () => { applyControls(); build(); });
 $('pin').addEventListener('change', build);
@@ -101,8 +102,48 @@ $('reset').addEventListener('click', build);
 applyControls();
 build();
 if (!simdSupported()) $('backend').querySelector('option[value=simd]').disabled = true;
-{ const hc = navigator.hardwareConcurrency || 4; $('thr').max = Math.max(1, Math.min(8, hc)); $('thr').value = Math.max(1, Math.min(4, hc >> 1)); }
+{ const hc = navigator.hardwareConcurrency || 4; $('thr').max = Math.max(1, Math.min(8, hc)); $('thr').value = 1; }
+// по умолчанию 2 потока (типичный телефон: 2 быстрых ядра + слабые); точнее поможет «Подобрать потоки»
 if (!simdSupported() || !mtSupported()) $('backend').querySelector('option[value=mt]').disabled = true;
+// Тест параллелизма: каждый поток считает одно и то же без общих данных. Если время растёт с числом потоков —
+// ядра реально не работают параллельно (большие/малые ядра, режим энергосбережения), и дело не в нашей синхронизации.
+$('thrtest').addEventListener('click', async () => {
+  if (!sim.mt) return;
+  const btn = $('thrtest'); btn.disabled = true;
+  const hc = navigator.hardwareConcurrency || 4, out = [];
+  await sim.setThreads(1);
+  let iters = 2e6, ms = sim.benchThreads(iters); // калибровка: 1 поток ≈ 80 мс
+  iters = Math.round(iters * 80 / Math.max(ms, 1));
+  for (let t = 1; t <= Math.min(8, hc); t++) {
+    await sim.setThreads(t);
+    sim.benchThreads(iters / 8); // прогрев/разбудить воркеры
+    const a = [1, 2, 3].map(() => sim.benchThreads(iters)).sort((p, q) => p - q)[1];
+    out.push(`${t}: ${a.toFixed(0)}`);
+    $('thrres').textContent = 'мс на поток → ' + out.join(' · ');
+  }
+  await sim.setThreads(+$('thr').value);
+  btn.disabled = false;
+});
+
+// Автоподбор: по очереди пробуем 1…N потоков, меряем реальное время шага, оставляем лучший
+let tuning = false;
+$('autothr').addEventListener('click', async () => {
+  if (tuning || !sim.mt) return;
+  tuning = true; $('autothr').disabled = true;
+  const hc = navigator.hardwareConcurrency || 4, cand = [1, 2, 3, 4, 6, 8].filter(t => t <= Math.min(8, hc));
+  let best = 1, bestMs = Infinity;
+  for (const t of cand) {
+    await sim.setThreads(t); $('thr').value = t; applyControls();
+    await new Promise(r => setTimeout(r, 600)); // прогрев
+    tune.sum = 0; tune.n = 0;
+    await new Promise(r => setTimeout(r, 1500));
+    const ms = tune.n ? tune.sum / tune.n : Infinity;
+    $('autothr').textContent = `подбор… ${t}: ${ms.toFixed(1)} мс`;
+    if (ms < bestMs * 0.97) { bestMs = ms; best = t; } // 3% запас: при равенстве берём меньше потоков
+  }
+  await sim.setThreads(best); $('thr').value = best; applyControls();
+  $('autothr').textContent = `лучшее: ${best} (${bestMs.toFixed(1)} мс)`; $('autothr').disabled = false; tuning = false;
+});
 $('thr').addEventListener('change', async () => { if (sim.setThreads && sim.mt) await sim.setThreads(+$('thr').value); });
 $('backend').addEventListener('change', () => setBackend($('backend').value));
 setBackend(simdSupported() ? (mtSupported() ? 'mt' : 'simd') : 'scalar'); // по умолчанию самое быстрое ядро
@@ -240,13 +281,14 @@ function draw() {
 
 // --- главный цикл: фиксированный шаг 60 Гц ---
 let last = performance.now(), acc = 0;
+const tune = { sum: 0, n: 0 }; // накопитель времени шага для автоподбора потоков
 const DT = 1 / 60;
 function frame(now) {
   acc += Math.min(0.1, (now - last) / 1000);
   last = now;
-  while (acc >= DT) { moveDrag(DT); const t0 = performance.now(); sim.step(DT); sim.stepMs = sim.stepMs * 0.95 + (performance.now() - t0) * 0.05; acc -= DT; }
+  while (acc >= DT) { moveDrag(DT); const t0 = performance.now(); sim.step(DT); const dtm = performance.now() - t0; sim.stepMs = sim.stepMs * 0.95 + dtm * 0.05; tune.sum += dtm; tune.n++; acc -= DT; }
   draw();
-  $('info').textContent = `ядро: ${$('backend').value}${sim.mt ? '×' + sim.threads : ''} · ${sim.stepMs.toFixed(2)} мс/кадр · частиц: ${sim.n} · кусков: ${sim.pieces} · трещин: ${sim.splits} · контактов: ${sim.contacts} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
+  $('info').textContent = `ядро: ${$('backend').value}${sim.mt ? '×' + sim.threads : ''} · ${sim.stepMs.toFixed(2)} мс/кадр${sim.prof ? ` [потоки мс: ${sim.prof.busy.map(b => b.toFixed(1)).join('/')}] [FEM ${sim.prof.fem.toFixed(1)} · напр. ${sim.prof.stress.toFixed(1)} · подгот. ${sim.prof.prep.toFixed(1)}]` : ''} · частиц: ${sim.n} · кусков: ${sim.pieces} · трещин: ${sim.splits} · контактов: ${sim.contacts} · вывернуто: ${sim.invertedCount()} · E: ${sim.energy().toFixed(0)}` + (sim.femEnabled ? ` · σmax: ${stressPct().toFixed(0)}% прочности` : '');
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

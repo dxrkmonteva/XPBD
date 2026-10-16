@@ -4,7 +4,7 @@
 import { Sim } from './sim.js';
 
 // Порядок ОБЯЗАН совпадать с enum в wasm/core.cpp
-const PN = ['GRAV', 'COMPL', 'ACOMPL', 'DAMP', 'YOUNG', 'NU', 'TEARSTRAIN', 'BW', 'BH', 'FRIC', 'CELL', 'SMAX', 'VMAX'];
+const PN = ['GRAV', 'COMPL', 'ACOMPL', 'DAMP', 'YOUNG', 'NU', 'TEARSTRAIN', 'BW', 'BH', 'FRIC', 'CELL', 'SMAX', 'VMAX', 'T0', 'T1', 'T2'];
 const QN = ['N', 'T', 'M', 'CAP', 'SUBSTEPS', 'FEM', 'AREA', 'COLLIDE', 'TEAR', 'CUT', 'PIECES', 'CONTACTS',
   'GRIDCAP', 'ITEMSCAP', 'NCOLORS', 'SIMD',
   'X', 'P', 'V', 'W', 'EDGES', 'REST', 'ALIVE', 'STRAIN', 'TRIS', 'TRIEDGES', 'RESTAREA', 'DMINV', 'VOL',
@@ -41,7 +41,7 @@ export async function loadCoreMT(src, spawn) {
   if (typeof src === 'string') bytes = await (await fetch(src)).arrayBuffer();
   const module = await WebAssembly.compile(bytes);
   const memory = new WebAssembly.Memory({ initial: 256, maximum: 4096, shared: true });
-  const instance = await WebAssembly.instantiate(module, { env: { memory } });
+  const instance = await WebAssembly.instantiate(module, { env: { memory, now: () => performance.now() } });
   const heap = (instance.exports.__heap_base.value + 7) & ~7;
   instance._mem = memory;
   instance._mt = { module, memory, spawn, workers: [], stackBase: heap };
@@ -186,6 +186,14 @@ export class WasmSim extends Sim {
     return n;
   }
 
+  // Тест параллелизма «железа»: каждый поток выполняет одинаковую вычислительную работу без общих данных.
+  // Идеал — время не растёт с числом потоков. Возвращает мс.
+  benchThreads(iters) {
+    if (!this.mt) return 0;
+    this.ex.set_threads(this.threads);
+    const t0 = performance.now(); this.ex.bench_threads(iters); return performance.now() - t0;
+  }
+
   stopThreads() {
     if (!this.mt) return;
     this.ex.stop_workers();
@@ -195,7 +203,7 @@ export class WasmSim extends Sim {
 
   step(dt) {
     if (!this.bound) return;
-    if (this.mt) this.ex.set_threads(this.threads);
+    if (this.mt) { this.ex.set_threads(this.threads); this.ex.set_sched(this.staticSched ? 1 : 0); this.ex.busy_reset(); }
     const t0 = performance.now();
     if (this._gridCells() > this.gridCap) this._bind(this._gridCells() * 2); // окно выросло — пересоздаём сетку
     const P_ = this.P, Q_ = this.Q;
@@ -209,6 +217,7 @@ export class WasmSim extends Sim {
     this.ex.step(dt);
     this.contacts = Q_[Q.CONTACTS];
     this.vmax = P_[P.VMAX];
+    this.prof = this.mt ? { prep: P_[P.T0], fem: P_[P.T1], stress: P_[P.T2], busy: Array.from({ length: this.threads }, (_, i) => this.ex.busy_get(i)) } : null; // мс по фазам (многопоточная сборка)
     // cutStep дорогой (O(T) на JS): пропускаем, если ни один элемент не достиг прочности (осреднённое по вершине
     // главное напряжение не может превысить максимум по элементам)
     if (this.femEnabled && this.tearEnabled && this.cutEnabled && P_[P.SMAX] > this.tearStrain * this.young) this.cutStep(this.tearStrain * this.young);
