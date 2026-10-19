@@ -146,12 +146,12 @@ export class Sim3D {
         ox += ry * fz - rz * fy; oy += rz * fx - rx * fz; oz += rx * fy - ry * fx; dot += rx * fx + ry * fy + rz * fz;
       }
       const k = 1 / (Math.abs(dot) + 1e-9); ox *= k; oy *= k; oz *= k;
-      const ang = Math.sqrt(ox * ox + oy * oy + oz * oz);
-      if (ang < 1e-9) break;
-      const s = Math.sin(ang / 2) / ang, c2 = Math.cos(ang / 2), sx = ox * s, sy = oy * s, sz = oz * s;
-      // q ← (s, c2) ⊗ q
-      const nx = c2 * qx + sx * qw + sy * qz - sz * qy, ny = c2 * qy + sy * qw + sz * qx - sx * qz;
-      const nz = c2 * qz + sz * qw + sx * qy - sy * qx, nw = c2 * qw - sx * qx - sy * qy - sz * qz;
+      if (ox * ox + oy * oy + oz * oz < 1e-18) break;
+      // dq = (ω/2, 1) без нормировки (≈ поворот на угол |ω|): без sin/cos — одинаковые числа в JS и WASM
+      const sx = ox * 0.5, sy = oy * 0.5, sz = oz * 0.5;
+      // q ← dq ⊗ q
+      const nx = qx + sx * qw + sy * qz - sz * qy, ny = qy + sy * qw + sz * qx - sx * qz;
+      const nz = qz + sz * qw + sx * qy - sy * qx, nw = qw - sx * qx - sy * qy - sz * qz;
       const l = 1 / Math.sqrt(nx * nx + ny * ny + nz * nz + nw * nw);
       qx = nx * l; qy = ny * l; qz = nz * l; qw = nw * l;
     }
@@ -191,6 +191,7 @@ export class Sim3D {
       let s = 0;
       for (let i = 0; i < 9; i++) { const e = F[i] - R[i]; G[i] = e; s += e * e; }
       const C = Math.sqrt(s);
+      this.defo[t] = C; // мера деформации для раскраски (последний подшаг)
       if (C > 1e-9) { for (let i = 0; i < 9; i++) G[i] /= C; this._apply(t, G, C, 1 / (2 * mu * vol[t]) / h2); }
       // 2) объёмная часть: C = det F − 1
       this._defGrad(t, F);
@@ -241,17 +242,6 @@ export class Sim3D {
       const k = this.damping / h;
       for (let i = 0; i < n * 3; i++) v[i] = (x[i] - p[i]) * k;
       for (let i = 0; i < n; i++) if (w[i] === 0) v[i * 3] = v[i * 3 + 1] = v[i * 3 + 2] = 0;
-    }
-    this._updateDeformation();
-  }
-
-  // Мера деформации элемента ||F − R|| (для раскраски)
-  _updateDeformation() {
-    const F = this._F || (this._F = new Float64Array(9)), R = this._R || (this._R = new Float64Array(9));
-    for (let t = 0; t < this.T; t++) {
-      this._defGrad(t, F); this._rotation(t, F, R, 1);
-      let s = 0; for (let i = 0; i < 9; i++) { const e = F[i] - R[i]; s += e * e; }
-      this.defo[t] = Math.sqrt(s);
     }
   }
 

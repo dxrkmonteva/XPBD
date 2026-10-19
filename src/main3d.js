@@ -1,6 +1,10 @@
 // M8: 3D-демо. Физика — Sim3D (JS), рендер — Renderer3D (WebGL2).
 // Управление: тянуть тело — захват вершины; тянуть пустое место — вращение камеры; колесо / щипок — масштаб.
 import { Sim3D } from './sim3d.js';
+import { Sim3DWasm, loadCore3D } from './wasm-sim3d.js';
+import { simdSupported } from './wasm-sim.js';
+import scalarUrl from './wasm/core3d.scalar.wasm?url';
+import simdUrl from './wasm/core3d.simd.wasm?url';
 import { Renderer3D, Camera } from './gl3d.js';
 
 const $ = id => document.getElementById(id);
@@ -8,7 +12,18 @@ const canvas = $('c');
 let gl3d;
 try { gl3d = new Renderer3D(canvas); } catch (e) { $('err').textContent = String(e.message || e); throw e; }
 const cam = new Camera();
-const sim = new Sim3D();
+let sim = new Sim3D();
+const cores = {};
+async function makeSim(kind) {
+  if (kind === 'js') return new Sim3D();
+  try {
+    if (!cores[kind]) cores[kind] = await loadCore3D(kind === 'simd' ? simdUrl : scalarUrl);
+    return new Sim3DWasm(cores[kind], { simd: kind === 'simd' });
+  } catch (e) { $('err').textContent = 'WASM недоступен: ' + (e.message || e); return new Sim3D(); }
+}
+if (!simdSupported()) $('backend').querySelector('option[value=simd]').disabled = true, $('backend').value = 'scalar';
+async function setBackend() { sim = await makeSim($('backend').value); build(); }
+$('backend').addEventListener('change', setBackend);
 
 function build() {
   const k = +$('detail').value;
@@ -73,10 +88,9 @@ function loop() {
   const t2 = performance.now();
   ms = ms * 0.9 + (t1 - t0) * 0.1;
   if (++frames % 15 === 0) {
-    $('info').textContent = `физика ${ms.toFixed(1)} мс/кадр · тетраэдров: ${sim.T} · вершин: ${sim.n} · вывернуто: ${sim.invertedCount()} · объём: ${(sim.volumeRatio() * 100).toFixed(1)}% · рендер ${(t2 - t1).toFixed(1)} мс`;
+    $('info').textContent = `ядро: ${$('backend').value} · физика ${ms.toFixed(1)} мс/кадр · тетраэдров: ${sim.T} · вершин: ${sim.n} · вывернуто: ${sim.invertedCount()} · объём: ${(sim.volumeRatio() * 100).toFixed(1)}% · рендер ${(t2 - t1).toFixed(1)} мс`;
   }
   requestAnimationFrame(loop);
 }
-build();
-requestAnimationFrame(loop);
-window.__dbg = { sim, gl3d, cam };
+setBackend().then(() => requestAnimationFrame(loop));
+window.__dbg = { get sim() { return sim; }, gl3d, cam };
