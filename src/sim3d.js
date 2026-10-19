@@ -6,6 +6,8 @@
 // прошлого подшага, поэтому хватает одной-двух итераций на элемент.
 // Единицы СИ: метры, килограммы, секунды; плотность ρ = 1000 кг/м³ (масса вершины = ρ · треть/четверть объёма соседей).
 
+export const DRAG_CAP = 4096; // макс. число захваченных вершин
+
 export class Sim3D {
   constructor() {
     this.gravity = 9.81;
@@ -17,7 +19,7 @@ export class Sim3D {
     this.substeps = 10;
     this.floorY = 0;
     this.n = 0; this.T = 0;
-    this.drag = { v: -1, tx: 0, ty: 0, tz: 0, compliance: 1e-4 };
+    this.drag = { n: 0, list: new Int32Array(DRAG_CAP), off: new Float64Array(DRAG_CAP * 3), tx: 0, ty: 0, tz: 0, compliance: 1e-4 };
     this.clear();
   }
 
@@ -26,7 +28,7 @@ export class Sim3D {
     this.x = new Float64Array(0); this.p = new Float64Array(0); this.v = new Float64Array(0); this.w = new Float64Array(0);
     this.tets = new Int32Array(0); this.dmInv = new Float64Array(0); this.vol = new Float64Array(0); this.rest = new Float64Array(0);
     this.quat = new Float64Array(0); this.faces = new Int32Array(0); this.defo = new Float32Array(0);
-    this.drag.v = -1; this._w0 = null;
+    this.drag.n = 0; this._w0 = null;
   }
 
   // Прямоугольный брус nx×ny×nz кубиков со стороной h, левый-нижний-ближний угол в (ox, oy, oz).
@@ -207,9 +209,19 @@ export class Sim3D {
     }
   }
 
-  // Захватить вершину i и тянуть её к точке (tx, ty, tz) мягкой пружиной (XPBD-ограничение расстояния)
-  grab(i, tx, ty, tz) { this.drag.v = i; this.drag.tx = tx; this.drag.ty = ty; this.drag.tz = tz; }
-  release() { this.drag.v = -1; }
+  // Захват области: все вершины в радиусе radius от точки (px, py, pz) тянутся мягкими пружинами к цели
+  // (tx, ty, tz) + их смещение относительно точки (область движется как целое — нет «шипа» на мелкой сетке).
+  startGrab(px, py, pz, radius, tx, ty, tz) {
+    const d = this.drag, x = this.x, w = this.w, r2 = radius * radius; let n = 0;
+    for (let i = 0; i < this.n && n < DRAG_CAP; i++) {
+      const dx = x[i * 3] - px, dy = x[i * 3 + 1] - py, dz = x[i * 3 + 2] - pz;
+      if (dx * dx + dy * dy + dz * dz <= r2 && w[i] > 0) { d.list[n] = i; d.off[n * 3] = dx; d.off[n * 3 + 1] = dy; d.off[n * 3 + 2] = dz; n++; }
+    }
+    d.n = n; d.tx = tx; d.ty = ty; d.tz = tz;
+    return n;
+  }
+  moveGrab(tx, ty, tz) { this.drag.tx = tx; this.drag.ty = ty; this.drag.tz = tz; }
+  release() { this.drag.n = 0; }
 
   // Закрепить вершины с координатой x в пределах eps от минимума (левая грань бруса)
   pinMinX(on, eps = 1e-6) {
@@ -229,9 +241,10 @@ export class Sim3D {
       }
       this.femSolve(h);
       const d = this.drag;
-      if (d.v >= 0 && w[d.v] > 0) { // мягкая пружина к цели: C = |x − target|
-        const a = d.v * 3, dx = x[a] - d.tx, dy = x[a + 1] - d.ty, dz = x[a + 2] - d.tz, L = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (L > 1e-9) { const dl = -L / (w[d.v] + d.compliance / (h * h)); x[a] += w[d.v] * dl * dx / L; x[a + 1] += w[d.v] * dl * dy / L; x[a + 2] += w[d.v] * dl * dz / L; }
+      for (let k = 0; k < d.n; k++) { // мягкие пружины к цели: C = |x − (цель + смещение)|
+        const i = d.list[k], wi = w[i]; if (wi <= 0) continue;
+        const a = i * 3, dx = x[a] - (d.tx + d.off[k * 3]), dy = x[a + 1] - (d.ty + d.off[k * 3 + 1]), dz = x[a + 2] - (d.tz + d.off[k * 3 + 2]), L = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (L > 1e-9) { const dl = -L / (wi + d.compliance / (h * h)); x[a] += wi * dl * dx / L; x[a + 1] += wi * dl * dy / L; x[a + 2] += wi * dl * dz / L; }
       }
       const fy = this.floorY, fr = 1 - this.friction;
       for (let i = 0; i < n; i++) {

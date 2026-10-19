@@ -1,11 +1,11 @@
 // M8: обёртка над C++/WASM 3D-ядром (wasm/core3d.cpp). Sim3DWasm наследует Sim3D: интерфейс тот же, step() — в WebAssembly.
 // Массивы состояния лежат в линейной памяти WASM, поля sim.x, sim.v, sim.tets … — TypedArray-представления на неё.
-import { Sim3D } from './sim3d.js';
+import { Sim3D, DRAG_CAP } from './sim3d.js';
 
 // Порядок ОБЯЗАН совпадать с enum в wasm/core3d.cpp
 const PN = ['GRAV', 'YOUNG', 'NU', 'DAMP', 'FRIC', 'FLOORY', 'DCOMPL', 'DX', 'DY', 'DZ'];
 const QN = ['N', 'T', 'SUBSTEPS', 'DRAGV', 'NCOLORS', 'SIMD', 'DIRTY', 'TP',
-  'X', 'P', 'V', 'W', 'TETS', 'DMINV', 'REST', 'QUAT', 'DEFO', 'CORDER', 'CSTART', 'ORD', 'SOA'];
+  'X', 'P', 'V', 'W', 'TETS', 'DMINV', 'REST', 'QUAT', 'DEFO', 'CORDER', 'CSTART', 'ORD', 'SOA', 'DRAGN', 'DLIST', 'DOFF'];
 const P = {}, Q = {};
 PN.forEach((k, i) => { P[k] = i; });
 QN.forEach((k, i) => { Q[k] = i; });
@@ -46,7 +46,7 @@ export class Sim3DWasm extends Sim3D {
     const snap = {};
     for (const k in names) snap[k] = this[k].slice();
     const Tp = T + 4 * MAX_COLORS;
-    const extra = { CORDER: [T, Int32Array], CSTART: [MAX_COLORS + 2, Int32Array], ORD: [Tp, Int32Array], SOA: [SOA_ARRAYS * Tp, Float32Array] };
+    const extra = { CORDER: [T, Int32Array], CSTART: [MAX_COLORS + 2, Int32Array], ORD: [Tp, Int32Array], SOA: [SOA_ARRAYS * Tp, Float32Array], DLIST: [DRAG_CAP, Int32Array], DOFF: [DRAG_CAP * 6, Float32Array] };
     let total = 0;
     for (const k in names) total += align8(snap[k].byteLength) + 8;
     for (const k in extra) total += align8(extra[k][0] * 4) + 8;
@@ -67,6 +67,8 @@ export class Sim3DWasm extends Sim3D {
     for (const k in extra) {
       const [len, Ctor] = extra[k];
       this['_' + k.toLowerCase()] = new Ctor(buf, off, len); this.Q[Q[k]] = off;
+      if (k === 'DLIST') this.drag.list = this._dlist;
+      if (k === 'DOFF') this.drag.off = new Float64Array(buf, off, DRAG_CAP * 3);
       off += align8(len * 4) + 8;
     }
     this.Q[Q.N] = n; this.Q[Q.T] = T; this.Q[Q.SIMD] = 0; this.Q[Q.NCOLORS] = 0;
@@ -110,7 +112,7 @@ export class Sim3DWasm extends Sim3D {
     const P_ = this.P, Q_ = this.Q, d = this.drag;
     P_[P.GRAV] = this.gravity; P_[P.YOUNG] = this.young; P_[P.NU] = this.nu; P_[P.DAMP] = this.damping; P_[P.FRIC] = this.friction;
     P_[P.FLOORY] = this.floorY; P_[P.DCOMPL] = d.compliance; P_[P.DX] = d.tx; P_[P.DY] = d.ty; P_[P.DZ] = d.tz;
-    Q_[Q.SUBSTEPS] = this.substeps; Q_[Q.DRAGV] = d.v;
+    Q_[Q.SUBSTEPS] = this.substeps; Q_[Q.DRAGN] = d.n;
     this.ex.step3(dt);
   }
 }

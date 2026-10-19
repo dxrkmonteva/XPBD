@@ -12,7 +12,7 @@ typedef double f64;
 
 enum { P_GRAV, P_YOUNG, P_NU, P_DAMP, P_FRIC, P_FLOORY, P_DCOMPL, P_DX, P_DY, P_DZ, P_COUNT = 16 };
 enum { Q_N, Q_T, Q_SUBSTEPS, Q_DRAGV, Q_NCOLORS, Q_SIMD, Q_DIRTY, Q_TP,
-       Q_X, Q_P, Q_V, Q_W, Q_TETS, Q_DMINV, Q_REST, Q_QUAT, Q_DEFO, Q_CORDER, Q_CSTART, Q_ORD, Q_SOA, Q_COUNT = 48 };
+       Q_X, Q_P, Q_V, Q_W, Q_TETS, Q_DMINV, Q_REST, Q_QUAT, Q_DEFO, Q_CORDER, Q_CSTART, Q_ORD, Q_SOA, Q_DRAGN, Q_DLIST, Q_DOFF, Q_COUNT = 48 };
 static f64 P[P_COUNT];
 static i32 Q[Q_COUNT];
 extern "C" {
@@ -272,7 +272,7 @@ extern "C" EXPORT("step3") void step3(f64 dt) {
   const bool simd = Q[Q_SIMD] && Q[Q_NCOLORS] > 0;
   if (simd) { if (Q[Q_DIRTY]) { prepareStatic(); Q[Q_DIRTY] = 0; } prepareDynamic(); }
 #endif
-  const i32 dv = Q[Q_DRAGV];
+  const i32 dn = Q[Q_DRAGN]; const i32* dlist = ptr<i32>(Q_DLIST); const f64* doff = ptr<f64>(Q_DOFF);
   for (i32 s = 0; s < S; s++) {
     for (i32 i = 0; i < n; i++) {
       const i32 a = i * 3;
@@ -283,9 +283,10 @@ extern "C" EXPORT("step3") void step3(f64 dt) {
     if (simd) femSolveColored(h); else
 #endif
     femSolveScalar(h);
-    if (dv >= 0 && w[dv] > 0) {
-      const i32 a = dv * 3; const f64 dx = x[a] - P[P_DX], dy = x[a + 1] - P[P_DY], dz = x[a + 2] - P[P_DZ], L = __builtin_sqrt(dx * dx + dy * dy + dz * dz);
-      if (L > 1e-9) { const f64 dl = -L / (w[dv] + P[P_DCOMPL] / (h * h)); x[a] += w[dv] * dl * dx / L; x[a + 1] += w[dv] * dl * dy / L; x[a + 2] += w[dv] * dl * dz / L; }
+    for (i32 k = 0; k < dn; k++) {
+      const i32 i = dlist[k]; const f64 wi = w[i]; if (wi <= 0) continue;
+      const i32 a = i * 3; const f64 dx = x[a] - (P[P_DX] + doff[k * 3]), dy = x[a + 1] - (P[P_DY] + doff[k * 3 + 1]), dz = x[a + 2] - (P[P_DZ] + doff[k * 3 + 2]), L = __builtin_sqrt(dx * dx + dy * dy + dz * dz);
+      if (L > 1e-9) { const f64 dl = -L / (wi + P[P_DCOMPL] / (h * h)); x[a] += wi * dl * dx / L; x[a + 1] += wi * dl * dy / L; x[a + 2] += wi * dl * dz / L; }
     }
     const f64 fy = P[P_FLOORY], fr = 1 - P[P_FRIC];
     for (i32 i = 0; i < n; i++) {

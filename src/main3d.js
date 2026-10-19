@@ -64,13 +64,13 @@ canvas.addEventListener('pointerdown', e => {
   canvas.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (ptrs.size === 2) { sim.release(); mode = 'pinch'; const [a, b] = [...ptrs.values()]; pinchD = Math.hypot(a.x - b.x, a.y - b.y); return; }
   const ray = rayAt(e), hit = gl3d.pick(sim, ray);
-  if (hit) { mode = 'grab'; grabDepth = hit.t * (ray.d[0] * ray.f[0] + ray.d[1] * ray.f[1] + ray.d[2] * ray.f[2]); sim.grab(hit.vertex, ...hit.point); }
+  if (hit) { mode = 'grab'; grabDepth = hit.t * (ray.d[0] * ray.f[0] + ray.d[1] * ray.f[1] + ray.d[2] * ray.f[2]); sim.startGrab(hit.point[0], hit.point[1], hit.point[2], Math.max(0.15, 3 * sim.spacing), ...hit.point); }
   else mode = 'orbit';
 });
 canvas.addEventListener('pointermove', e => {
   const p = ptrs.get(e.pointerId); if (!p) return;
   const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
-  if (mode === 'grab' && ptrs.size === 1) { const t = dragTarget(e); sim.grab(sim.drag.v, ...t); }
+  if (mode === 'grab' && ptrs.size === 1) { const t = dragTarget(e); sim.moveGrab(...t); }
   else if (mode === 'orbit' && ptrs.size === 1) { cam.yaw -= dx * 0.008; cam.pitch = Math.max(-0.2, Math.min(1.45, cam.pitch + dy * 0.008)); }
   else if (mode === 'pinch' && ptrs.size === 2) { const [a, b] = [...ptrs.values()], d = Math.hypot(a.x - b.x, a.y - b.y); if (pinchD > 0) cam.dist = Math.max(1.2, Math.min(14, cam.dist * pinchD / d)); pinchD = d; }
 });
