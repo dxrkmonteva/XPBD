@@ -6,6 +6,7 @@ import { simdSupported } from './wasm-sim.js';
 import scalarUrl from './wasm/core3d.scalar.wasm?url';
 import simdUrl from './wasm/core3d.simd.wasm?url';
 import { Renderer3D, Camera } from './gl3d.js';
+import { Sim3DGPU, createGPU, gpuAvailable } from './gpusim3d.js';
 
 const $ = id => document.getElementById(id);
 const canvas = $('c');
@@ -14,13 +15,24 @@ try { gl3d = new Renderer3D(canvas); } catch (e) { $('err').textContent = String
 const cam = new Camera();
 let sim = new Sim3D();
 const cores = {};
+let gpuCtx = null;
 async function makeSim(kind) {
   if (kind === 'js') return new Sim3D();
+  if (kind === 'gpu') {
+    try {
+      if (!gpuCtx) gpuCtx = await createGPU();
+      const k = simdSupported() ? 'simd' : 'scalar';
+      if (!cores[k]) cores[k] = await loadCore3D(k === 'simd' ? simdUrl : scalarUrl);
+      $('err').textContent = '';
+      return new Sim3DGPU(cores[k], gpuCtx);
+    } catch (e) { $('err').textContent = 'GPU недоступен: ' + (e.message || e); $('backend').value = 'simd'; kind = 'simd'; }
+  }
   try {
     if (!cores[kind]) cores[kind] = await loadCore3D(kind === 'simd' ? simdUrl : scalarUrl);
     return new Sim3DWasm(cores[kind], { simd: kind === 'simd' });
   } catch (e) { $('err').textContent = 'WASM недоступен: ' + (e.message || e); return new Sim3D(); }
 }
+if (!gpuAvailable()) $('backend').querySelector('option[value=gpu]').disabled = true;
 if (!simdSupported()) $('backend').querySelector('option[value=simd]').disabled = true, $('backend').value = 'scalar';
 async function setBackend() { sim = await makeSim($('backend').value); build(); }
 $('backend').addEventListener('change', setBackend);
@@ -38,7 +50,7 @@ function applyControls() {
   sim.gravity = +$('grav').value;
   sim.substeps = +$('sub').value;
   sim.friction = +$('fric').value / 100;
-  gl3d.colorize = $('colorize').checked ? 1 / 0.5 : 0;
+  gl3d.colorize = $('colorize').checked ? 1 / 0.5 : 0; sim.wantDefo = $('colorize').checked;
   sim.pinMinX($('pin').checked, 1e-6);
   $('v-young').textContent = (sim.young / 1e6).toFixed(2) + ' МПа';
   $('v-nu').textContent = sim.nu.toFixed(2);
@@ -100,7 +112,7 @@ function loop() {
   const t2 = performance.now();
   ms = ms * 0.9 + (t1 - t0) * 0.1;
   if (++frames % 15 === 0) {
-    $('info').textContent = `ядро: ${$('backend').value} · физика ${ms.toFixed(1)} мс/кадр · тетраэдров: ${sim.T} · вершин: ${sim.n} · вывернуто: ${sim.invertedCount()} · объём: ${(sim.volumeRatio() * 100).toFixed(1)}% · рендер ${(t2 - t1).toFixed(1)} мс`;
+    $('info').textContent = `ядро: ${$('backend').value} · ${sim.gpu ? 'GPU ' + sim.statMs.toFixed(1) + ' мс/кадр (задержка до готовности)' : 'физика ' + ms.toFixed(1) + ' мс/кадр'} · тетраэдров: ${sim.T} · вершин: ${sim.n} · вывернуто: ${sim.invertedCount()} · объём: ${(sim.volumeRatio() * 100).toFixed(1)}% · рендер ${(t2 - t1).toFixed(1)} мс`;
   }
   requestAnimationFrame(loop);
 }
