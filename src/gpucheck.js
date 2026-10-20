@@ -117,7 +117,8 @@ fn solve(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 async function gpuBench(sim, frames, substeps) {
   const adapter = await navigator.gpu.requestAdapter();
-  const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: Math.min(8, adapter.limits.maxStorageBuffersPerShaderStage) } });
+  const hasTS = adapter.features.has('timestamp-query');
+  const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: Math.min(8, adapter.limits.maxStorageBuffersPerShaderStage) }, requiredFeatures: hasTS ? ['timestamp-query'] : [] });
   const n = sim.n, T = sim.T, nc = sim.ncolors, ord = sim._ord, cst = sim._cstart;
   // компактный порядок тетраэдров по цветам (без пустых слотов)
   const order = [], offs = [], cnts = [];
@@ -155,28 +156,45 @@ async function gpuBench(sim, frames, substeps) {
   const pipe = name => device.createComputePipeline({ layout, compute: { module, entryPoint: name } });
   const pPredict = pipe('predict'), pPost = pipe('post'), pSolve = pipe('solve');
   const bg = device.createBindGroup({ layout: bgl, entries: [bPos, bPrv, bVel, bW, bT, bDm, bIv, bQ].map((b, i) => ({ binding: i, resource: { buffer: b } })).concat([{ binding: 8, resource: { buffer: bU, size: 256 } }]) });
-  const frame = () => {
-    const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
+  const qs = hasTS ? device.createQuerySet({ type: 'timestamp', count: 2 }) : null;
+  const qRes = hasTS ? device.createBuffer({ size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }) : null;
+  const qRead = hasTS ? device.createBuffer({ size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }) : null;
+  const frame = (timed = false) => {
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass(timed && qs ? { timestampWrites: { querySet: qs, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } } : undefined);
     for (let s = 0; s < substeps; s++) {
       pass.setPipeline(pPredict); pass.setBindGroup(0, bg, [0]); pass.dispatchWorkgroups(Math.ceil(n / 64));
       pass.setPipeline(pSolve);
       for (let c = 0; c < nc; c++) { pass.setBindGroup(0, bg, [(2 + c) * SZ]); pass.dispatchWorkgroups(Math.ceil(cnts[c] / 64)); }
       pass.setPipeline(pPost); pass.setBindGroup(0, bg, [SZ]); pass.dispatchWorkgroups(Math.ceil(n / 64));
     }
-    pass.end(); device.queue.submit([enc.finish()]);
+    pass.end();
+    if (timed && qs) { enc.resolveQuerySet(qs, 0, 2, qRes, 0); enc.copyBufferToBuffer(qRes, 0, qRead, 0, 16); }
+    device.queue.submit([enc.finish()]);
   };
   for (let i = 0; i < 3; i++) frame();
   await device.queue.onSubmittedWorkDone();
+  // 1) задержка: кадр → ожидание завершения (то, что видит один кадр)
   const times = [];
   for (let i = 0; i < frames; i++) { const t0 = performance.now(); frame(); await device.queue.onSubmittedWorkDone(); times.push(performance.now() - t0); }
   times.sort((a, b) => a - b);
+  // 2) пропускная способность: кадры подряд без ожидания (как при реальной игре, когда CPU занят чем-то другим)
+  const tp0 = performance.now(); for (let i = 0; i < frames; i++) frame(); await device.queue.onSubmittedWorkDone();
+  const throughput = (performance.now() - tp0) / frames;
+  // 3) чистое время работы GPU по аппаратным таймерам (без накладных расходов CPU/драйвера на отправку)
+  let gpuMs = null;
+  if (hasTS) {
+    const g = [];
+    for (let i = 0; i < 6; i++) { frame(true); await qRead.mapAsync(GPUMapMode.READ); const t = new BigUint64Array(qRead.getMappedRange().slice(0)); qRead.unmap(); g.push(Number(t[1] - t[0]) / 1e6); }
+    g.sort((a, b) => a - b); gpuMs = g[g.length >> 1];
+  }
   // проверка: позиции конечны, тело не улетело
   const rb = device.createBuffer({ size: n * 12, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const enc = device.createCommandEncoder(); enc.copyBufferToBuffer(bPos, 0, rb, 0, n * 12); device.queue.submit([enc.finish()]);
   await rb.mapAsync(GPUMapMode.READ); const res = new Float32Array(rb.getMappedRange().slice(0)); rb.unmap();
   let ok = true, ymin = 1e9, ymax = -1e9; for (let i = 0; i < n; i++) { const y = res[i * 3 + 1]; if (!Number.isFinite(y)) ok = false; ymin = Math.min(ymin, y); ymax = Math.max(ymax, y); }
   device.destroy();
-  return { median: times[times.length >> 1], min: times[0], dispatches: substeps * (nc + 2), ok, ymin, ymax, adapter };
+  return { median: times[times.length >> 1], min: times[0], throughput, gpuMs, dispatches: substeps * (nc + 2), ok, ymin, ymax, adapter };
 }
 
 async function main() {
@@ -191,14 +209,14 @@ async function main() {
   log(`лимиты: storage-буферов на стадию ${L.maxStorageBuffersPerShaderStage}, размер storage-буфера ${(L.maxStorageBufferBindingSize / 1048576) | 0} МБ, workgroup ${L.maxComputeWorkgroupSizeX}, invocations ${L.maxComputeInvocationsPerWorkgroup}`);
   log('функции: ' + ([...adapter.features].join(', ') || '—'));
   const core = await loadCore3D(simdUrl);
-  for (const k of [2, 4, 6]) {
+  for (const k of [4, 6, 8, 10, 12]) {
     const sim = new Sim3DWasm(core, { simd: true }); sim.buildBox(8 * k, 2 * k, 2 * k, 0.25 / k, 0, 0.6, 0);
-    for (let i = 0; i < 5; i++) sim.step(1 / 60);
-    const N = k >= 6 ? 8 : 20, t0 = performance.now(); for (let i = 0; i < N; i++) sim.step(1 / 60);
+    for (let i = 0; i < 2; i++) sim.step(1 / 60);
+    const N = k >= 10 ? 3 : k >= 6 ? 8 : 20, t0 = performance.now(); for (let i = 0; i < N; i++) sim.step(1 / 60);
     const cpu = (performance.now() - t0) / N;
     try {
-      const g = await gpuBench(sim, k >= 6 ? 12 : 25, 10);
-      log(`\n×${k}: ${sim.T} тетраэдров, ${sim.ncolors} цветов, ${g.dispatches} dispatch/кадр\n   CPU WASM SIMD: ${cpu.toFixed(1)} мс/кадр\n   GPU WebGPU:    ${g.median.toFixed(1)} мс/кадр (лучший ${g.min.toFixed(1)})  ${g.ok ? '' : '⚠ NaN в позициях'}  y∈[${g.ymin.toFixed(2)}, ${g.ymax.toFixed(2)}]\n   выигрыш: ×${(cpu / g.median).toFixed(2)}`);
+      const g = await gpuBench(sim, k >= 8 ? 8 : 20, 10);
+      log(`\n×${k}: ${sim.T} тетраэдров, ${sim.ncolors} цветов, ${g.dispatches} dispatch/кадр${g.ok ? '' : '  ⚠ NaN'}\n   CPU WASM SIMD:        ${cpu.toFixed(1)} мс/кадр\n   GPU, с ожиданием:     ${g.median.toFixed(1)} мс (лучший ${g.min.toFixed(1)})\n   GPU, конвейер:        ${g.throughput.toFixed(1)} мс/кадр   → выигрыш ×${(cpu / g.throughput).toFixed(2)}\n   GPU, чистое время:    ${g.gpuMs === null ? 'нет таймеров' : g.gpuMs.toFixed(1) + ' мс (по аппаратному таймеру)'}`);
     } catch (e) { log(`\n×${k}: GPU-тест упал: ${e.message || e}`); }
   }
   log('\nГотово. Пришли скриншот этой страницы.');
