@@ -112,7 +112,7 @@ function loop() {
   const t2 = performance.now();
   ms = ms * 0.9 + (t1 - t0) * 0.1;
   if (++frames % 15 === 0) {
-    $('info').textContent = `ядро: ${$('backend').value} · ${sim.gpu ? 'GPU ' + sim.statMs.toFixed(1) + ' мс/кадр (задержка до готовности)' : 'физика ' + ms.toFixed(1) + ' мс/кадр'} · тетраэдров: ${sim.T} · вершин: ${sim.n} · вывернуто: ${sim.invertedCount()} · объём: ${(sim.volumeRatio() * 100).toFixed(1)}% · рендер ${(t2 - t1).toFixed(1)} мс`;
+    $('info').textContent = `ядро: ${$('backend').value} · ${sim.gpu ? 'GPU ' + (sim.gpuMs ? sim.gpuMs.toFixed(1) + ' мс чистых' : '—') + ' · кадр→готово ' + sim.statMs.toFixed(1) + ' · шаг каждые ' + sim.stepMs.toFixed(1) + ' мс · пропущено ' + sim.skipped : 'физика ' + ms.toFixed(1) + ' мс/кадр'} · тетраэдров: ${sim.T} · вершин: ${sim.n} · вывернуто: ${sim.invertedCount()} · объём: ${(sim.volumeRatio() * 100).toFixed(1)}% · рендер ${(t2 - t1).toFixed(1)} мс`;
   }
   requestAnimationFrame(loop);
 }

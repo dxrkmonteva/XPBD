@@ -134,7 +134,10 @@ export async function createGPU() {
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error('нет адаптера WebGPU');
   if (adapter.limits.maxStorageBuffersPerShaderStage < WANT_STORAGE) throw new Error('мало storage-буферов: ' + adapter.limits.maxStorageBuffersPerShaderStage);
-  const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: WANT_STORAGE } });
+  const hasTS = adapter.features.has('timestamp-query');
+  const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: WANT_STORAGE }, requiredFeatures: hasTS ? ['timestamp-query'] : [] });
+  const U = GPUBufferUsage;
+  const ts = hasTS ? { qs: device.createQuerySet({ type: 'timestamp', count: 2 }), res: device.createBuffer({ size: 16, usage: U.QUERY_RESOLVE | U.COPY_SRC }), rd: device.createBuffer({ size: 16, usage: U.COPY_DST | U.MAP_READ }), busy: false } : null;
   const entries = [];
   for (let i = 0; i <= 7; i++) entries.push({ binding: i, visibility: GPUShaderStage.COMPUTE, buffer: { type: i >= 3 && i <= 6 ? 'read-only-storage' : 'storage' } });
   entries.push({ binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform', hasDynamicOffset: true } });
@@ -147,13 +150,13 @@ export async function createGPU() {
   const errs = info.messages.filter(m => m.type === 'error');
   if (errs.length) throw new Error('WGSL: ' + errs.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join('; '));
   const pipe = entryPoint => device.createComputePipeline({ layout, compute: { module, entryPoint } });
-  return { device, bgl, adapterInfo: adapter.info || {}, pPredict: pipe('predict'), pSolve: pipe('solve'), pPost: pipe('post'), pDrag: pipe('dragk') };
+  return { device, ts, bgl, adapterInfo: adapter.info || {}, pPredict: pipe('predict'), pSolve: pipe('solve'), pPost: pipe('post'), pDrag: pipe('dragk') };
 }
 
 export class Sim3DGPU extends Sim3DWasm {
   constructor(instance, gpu) {
     super(instance, { simd: true });
-    this.gpu = gpu; this.statMs = 0; this.wantDefo = true;
+    this.gpu = gpu; this.statMs = 0; this.gpuMs = 0; this.stepMs = 0; this.skipped = 0; this._tLast = 0; this.wantDefo = true;
     this._gen = 0; this._inflight = 0; this._rbBusy = false; this._frame = 0; this._buf = null;
   }
 
@@ -197,7 +200,8 @@ export class Sim3DGPU extends Sim3DWasm {
   }
 
   step(dt) {
-    if (!this.bound || !this._buf || this._inflight >= 2) return;
+    if (!this.bound || !this._buf) return;
+    if (this._inflight >= 2) { this.skipped++; return; } // GPU не успевает — кадр физики пропускаем, очередь не копим
     const { device, pPredict, pSolve, pPost, pDrag } = this.gpu, B = this._buf, n = this.n, nc = this.ncolors, S = this.substeps, h = dt / S, d = this.drag, dn = d.n;
     const { mu, lam } = this._lame(), uv = this._uv;
     const put = (i, count, off) => {
@@ -212,7 +216,10 @@ export class Sim3DGPU extends Sim3DWasm {
       for (let k = 0; k < dn; k++) { f[k * 4] = d.tx + d.off[k * 3]; f[k * 4 + 1] = d.ty + d.off[k * 3 + 1]; f[k * 4 + 2] = d.tz + d.off[k * 3 + 2]; u[k * 4 + 3] = d.list[k]; }
       device.queue.writeBuffer(B.drag, 0, this._dragBuf, 0, dn * 16);
     }
-    const enc = device.createCommandEncoder(), pass = enc.beginComputePass(), bg = this._bg;
+    const ts = this.gpu.ts, useTS = ts && !ts.busy && (this._frame & 7) === 0, now = performance.now();
+    if (this._tLast) this.stepMs = this.stepMs ? this.stepMs * 0.9 + (now - this._tLast) * 0.1 : now - this._tLast;
+    this._tLast = now;
+    const enc = device.createCommandEncoder(), pass = enc.beginComputePass(useTS ? { timestampWrites: { querySet: ts.qs, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } } : undefined), bg = this._bg;
     for (let s = 0; s < S; s++) {
       pass.setPipeline(pPredict); pass.setBindGroup(0, bg, [0]); pass.dispatchWorkgroups(Math.ceil(n / 64));
       pass.setPipeline(pSolve);
@@ -221,9 +228,12 @@ export class Sim3DGPU extends Sim3DWasm {
       pass.setPipeline(pPost); pass.setBindGroup(0, bg, [SZ]); pass.dispatchWorkgroups(Math.ceil(n / 64));
     }
     pass.end();
-    const rb = !this._rbBusy, rbDef = rb && this.wantDefo && (this._frame++ & 3) === 0;
+    if (useTS) { enc.resolveQuerySet(ts.qs, 0, 2, ts.res, 0); enc.copyBufferToBuffer(ts.res, 0, ts.rd, 0, 16); }
+    this._frame++;
+    const rb = !this._rbBusy, rbDef = rb && this.wantDefo && (this._frame & 3) === 1;
     if (rb) { enc.copyBufferToBuffer(B.pos, 0, B.sPos, 0, n * 12); if (rbDef) enc.copyBufferToBuffer(B.defo, 0, B.sDef, 0, this.T * 4); }
     device.queue.submit([enc.finish()]);
+    if (useTS) { ts.busy = true; ts.rd.mapAsync(GPUMapMode.READ).then(() => { const t = new BigUint64Array(ts.rd.getMappedRange().slice(0)); ts.rd.unmap(); const g = Number(t[1] - t[0]) / 1e6; this.gpuMs = this.gpuMs ? this.gpuMs * 0.7 + g * 0.3 : g; ts.busy = false; }).catch(() => { ts.busy = false; }); }
     const t0 = performance.now(), gen = this._gen; this._inflight++;
     device.queue.onSubmittedWorkDone().then(() => { this._inflight--; this.statMs = this.statMs * 0.9 + (performance.now() - t0) * 0.1; });
     if (rb) {
