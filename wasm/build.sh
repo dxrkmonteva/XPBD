@@ -30,3 +30,10 @@ if grep -q "USE_THREADS" core.cpp; then
     -Wl,--export=__heap_base -Wl,--export=__stack_pointer -Wl,-z,stack-size=65536 -o "$OUT/core.simd.mt.wasm" core.cpp
   ls -l "$OUT/core.simd.mt.wasm"
 fi
+
+# M8: 3D-ядро (отдельный модуль): скалярное и SIMD
+echo "3d scalar..."
+"$CLANG" "${COMMON[@]}" -o "$OUT/core3d.scalar.wasm" core3d.cpp
+echo "3d simd..."
+"$CLANG" "${COMMON[@]}" -msimd128 -DUSE_SIMD -o "$OUT/core3d.simd.wasm" core3d.cpp
+ls -l "$OUT"/core3d.*.wasm
