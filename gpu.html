@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>XPBD — проверка WebGPU</title>
+  <style>
+    html, body { margin: 0; background: #0b0e14; color: #e6edf6; font-family: system-ui, sans-serif; }
+    body { padding: 12px; }
+    pre { white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.45; }
+    button, a.btn { background: #1b2636; color: inherit; border: 1px solid #33465f; border-radius: 8px; padding: 8px 14px; font-size: 14px; text-decoration: none; margin-right: 8px; }
+  </style>
+</head>
+<body>
+  <p><a class="btn" href="./3d.html">← 3D</a><button id="run">Запустить снова</button></p>
+  <pre id="out">Проверяю WebGPU…</pre>
+  <script type="module" src="/src/gpucheck.js"></script>
+</body>
+</html>
