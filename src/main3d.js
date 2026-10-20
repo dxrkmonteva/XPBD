@@ -102,11 +102,15 @@ const end = e => {
 canvas.addEventListener('pointerup', end); canvas.addEventListener('pointercancel', end);
 canvas.addEventListener('wheel', e => { e.preventDefault(); cam.dist = Math.max(1.2, Math.min(14, cam.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
 
-// ---- главный цикл: один фиксированный шаг 1/60 за кадр ----
-let ms = 0, frames = 0;
+// ---- главный цикл: фиксированный шаг 1/60 с накоплением реального времени (допуск 15%, чтобы на 60 Гц не терять шаги из-за дрожания кадров) ----
+let ms = 0, frames = 0, acc = 0, tPrev = performance.now();
+const DT = 1 / 60, MAX_STEPS = 3;
 function loop() {
   const t0 = performance.now();
-  sim.step(1 / 60);
+  // фиксированный шаг по реальному времени: скорость физики не зависит от частоты экрана (60/90/120 Гц)
+  acc += Math.min(0.05, (t0 - tPrev) / 1000); tPrev = t0;
+  for (let k = 0; k < MAX_STEPS && acc >= DT * 0.85; k++) { if (sim.step(DT) === false) { acc = 0; break; } acc -= DT; }
+  acc = Math.min(acc, DT); // долг не копим: если не успеваем, физика идёт медленнее реального времени, а не «спиралью»
   const t1 = performance.now();
   gl3d.draw(sim, cam);
   const t2 = performance.now();

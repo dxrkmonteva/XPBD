@@ -200,8 +200,8 @@ export class Sim3DGPU extends Sim3DWasm {
   }
 
   step(dt) {
-    if (!this.bound || !this._buf) return;
-    if (this._inflight >= 2) { this.skipped++; return; } // GPU не успевает — кадр физики пропускаем, очередь не копим
+    if (!this.bound || !this._buf) return false;
+    if (this._inflight >= 2) { this.skipped++; return false; } // GPU не успевает — кадр физики пропускаем, очередь не копим
     const { device, pPredict, pSolve, pPost, pDrag } = this.gpu, B = this._buf, n = this.n, nc = this.ncolors, S = this.substeps, h = dt / S, d = this.drag, dn = d.n;
     const { mu, lam } = this._lame(), uv = this._uv;
     const put = (i, count, off) => {
@@ -247,5 +247,6 @@ export class Sim3DGPU extends Sim3DWasm {
         this._rbBusy = false;
       }).catch(() => { if (gen === this._gen) this._rbBusy = false; });
     }
+    return true;
   }
 }
