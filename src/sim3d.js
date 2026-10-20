@@ -28,7 +28,7 @@ export class Sim3D {
     this.x = new Float64Array(0); this.p = new Float64Array(0); this.v = new Float64Array(0); this.w = new Float64Array(0);
     this.tets = new Int32Array(0); this.dmInv = new Float64Array(0); this.vol = new Float64Array(0); this.rest = new Float64Array(0);
     this.quat = new Float64Array(0); this.faces = new Int32Array(0); this.defo = new Float32Array(0);
-    this.drag.n = 0; this._w0 = null;
+    this.drag.n = 0; this._grabs = null; this._w0 = null;
   }
 
   // Прямоугольный брус nx×ny×nz кубиков со стороной h, левый-нижний-ближний угол в (ox, oy, oz).
@@ -211,17 +211,41 @@ export class Sim3D {
 
   // Захват области: все вершины в радиусе radius от точки (px, py, pz) тянутся мягкими пружинами к цели
   // (tx, ty, tz) + их смещение относительно точки (область движется как целое — нет «шипа» на мелкой сетке).
-  startGrab(px, py, pz, radius, tx, ty, tz) {
-    const d = this.drag, x = this.x, w = this.w, r2 = radius * radius; let n = 0;
-    for (let i = 0; i < this.n && n < DRAG_CAP; i++) {
+  // Захватов может быть несколько одновременно (по одному на палец/указатель): id — любой ключ.
+  // В drag.list/off лежат абсолютные цели каждой вершины (drag.tx=ty=tz=0), ядро (JS/WASM) от числа захватов не зависит.
+  startGrab(px, py, pz, radius, tx, ty, tz, id = 0) {
+    const x = this.x, w = this.w, r2 = radius * radius, idx = [], off = [];
+    this._grabs = this._grabs || new Map();
+    this._grabs.delete(id);
+    let used = 0; for (const g of this._grabs.values()) used += g.idx.length;
+    for (let i = 0; i < this.n && used + idx.length < DRAG_CAP; i++) {
       const dx = x[i * 3] - px, dy = x[i * 3 + 1] - py, dz = x[i * 3 + 2] - pz;
-      if (dx * dx + dy * dy + dz * dz <= r2 && w[i] > 0) { d.list[n] = i; d.off[n * 3] = dx; d.off[n * 3 + 1] = dy; d.off[n * 3 + 2] = dz; n++; }
+      if (dx * dx + dy * dy + dz * dz <= r2 && w[i] > 0) { idx.push(i); off.push(dx, dy, dz); }
     }
-    d.n = n; d.tx = tx; d.ty = ty; d.tz = tz;
-    return n;
+    this._grabs.set(id, { idx, off, t: [tx, ty, tz] });
+    this._packGrabs();
+    return idx.length;
   }
-  moveGrab(tx, ty, tz) { this.drag.tx = tx; this.drag.ty = ty; this.drag.tz = tz; }
-  release() { this.drag.n = 0; }
+  moveGrab(tx, ty, tz, id = 0) {
+    const g = this._grabs && this._grabs.get(id); if (!g) return;
+    g.t[0] = tx; g.t[1] = ty; g.t[2] = tz; this._packGrabs();
+  }
+  release(id) {
+    if (!this._grabs) { this.drag.n = 0; return; }
+    if (id === undefined) this._grabs.clear(); else this._grabs.delete(id);
+    this._packGrabs();
+  }
+  get grabCount() { return this._grabs ? this._grabs.size : 0; }
+  _packGrabs() {
+    const d = this.drag; let n = 0;
+    for (const g of this._grabs.values()) {
+      for (let k = 0; k < g.idx.length && n < DRAG_CAP; k++, n++) {
+        d.list[n] = g.idx[k];
+        d.off[n * 3] = g.t[0] + g.off[k * 3]; d.off[n * 3 + 1] = g.t[1] + g.off[k * 3 + 1]; d.off[n * 3 + 2] = g.t[2] + g.off[k * 3 + 2];
+      }
+    }
+    d.n = n; d.tx = d.ty = d.tz = 0;
+  }
 
   // Закрепить вершины с координатой x в пределах eps от минимума (левая грань бруса)
   pinMinX(on, eps = 1e-6) {

@@ -53,28 +53,40 @@ $('detail').addEventListener('change', build);
 $('reset').addEventListener('click', build);
 
 // ---- ввод: указатели ----
-const ptrs = new Map(); let mode = null, grabDepth = 0, pinchD = 0;
+const ptrs = new Map(); let mode = null, pinchD = 0; // ptrs: id → {x, y, grab?: глубина захвата}
 const aspect = () => canvas.clientWidth / canvas.clientHeight;
 function rayAt(e) { const r = canvas.getBoundingClientRect(); return cam.ray(((e.clientX - r.left) / r.width) * 2 - 1, 1 - ((e.clientY - r.top) / r.height) * 2, aspect()); }
-function dragTarget(e) { // пересечение луча с плоскостью, перпендикулярной взгляду, на глубине захвата
-  const ray = rayAt(e), f = ray.f, t = grabDepth / (ray.d[0] * f[0] + ray.d[1] * f[1] + ray.d[2] * f[2]);
+function dragTarget(e, depth) { // пересечение луча с плоскостью, перпендикулярной взгляду, на глубине захвата
+  const ray = rayAt(e), f = ray.f, t = depth / (ray.d[0] * f[0] + ray.d[1] * f[1] + ray.d[2] * f[2]);
   return [ray.o[0] + ray.d[0] * t, Math.max(0.02, ray.o[1] + ray.d[1] * t), ray.o[2] + ray.d[2] * t];
 }
+const grabsActive = () => [...ptrs.values()].filter(p => p.grab !== undefined).length;
 canvas.addEventListener('pointerdown', e => {
-  canvas.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
-  if (ptrs.size === 2) { sim.release(); mode = 'pinch'; const [a, b] = [...ptrs.values()]; pinchD = Math.hypot(a.x - b.x, a.y - b.y); return; }
+  canvas.setPointerCapture(e.pointerId);
+  const p = { x: e.clientX, y: e.clientY }; ptrs.set(e.pointerId, p);
   const ray = rayAt(e), hit = gl3d.pick(sim, ray);
-  if (hit) { mode = 'grab'; grabDepth = hit.t * (ray.d[0] * ray.f[0] + ray.d[1] * ray.f[1] + ray.d[2] * ray.f[2]); sim.startGrab(hit.point[0], hit.point[1], hit.point[2], Math.max(0.15, 3 * sim.spacing), ...hit.point); }
+  if (hit) { // каждый палец, попавший в тело, держит свою область — можно тянуть двумя пальцами в разные стороны
+    p.grab = hit.t * (ray.d[0] * ray.f[0] + ray.d[1] * ray.f[1] + ray.d[2] * ray.f[2]);
+    sim.startGrab(hit.point[0], hit.point[1], hit.point[2], Math.max(0.15, 3 * sim.spacing), ...hit.point, e.pointerId);
+    mode = 'grab';
+  } else if (mode === 'grab') { /* второй палец мимо тела при активном захвате — игнорируем */ }
+  else if (ptrs.size === 2) { mode = 'pinch'; const [a, b] = [...ptrs.values()]; pinchD = Math.hypot(a.x - b.x, a.y - b.y); }
   else mode = 'orbit';
 });
 canvas.addEventListener('pointermove', e => {
   const p = ptrs.get(e.pointerId); if (!p) return;
   const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
-  if (mode === 'grab' && ptrs.size === 1) { const t = dragTarget(e); sim.moveGrab(...t); }
+  if (p.grab !== undefined) sim.moveGrab(...dragTarget(e, p.grab), e.pointerId);
   else if (mode === 'orbit' && ptrs.size === 1) { cam.yaw -= dx * 0.008; cam.pitch = Math.max(-0.2, Math.min(1.45, cam.pitch + dy * 0.008)); }
   else if (mode === 'pinch' && ptrs.size === 2) { const [a, b] = [...ptrs.values()], d = Math.hypot(a.x - b.x, a.y - b.y); if (pinchD > 0) cam.dist = Math.max(1.2, Math.min(14, cam.dist * pinchD / d)); pinchD = d; }
 });
-const end = e => { ptrs.delete(e.pointerId); if (ptrs.size === 0) { sim.release(); mode = null; } else if (ptrs.size === 1) { mode = 'orbit'; sim.release(); } };
+const end = e => {
+  const p = ptrs.get(e.pointerId); if (!p) return;
+  if (p.grab !== undefined) sim.release(e.pointerId);
+  ptrs.delete(e.pointerId);
+  if (ptrs.size === 0) mode = null;
+  else if (grabsActive() === 0) mode = 'orbit';
+};
 canvas.addEventListener('pointerup', end); canvas.addEventListener('pointercancel', end);
 canvas.addEventListener('wheel', e => { e.preventDefault(); cam.dist = Math.max(1.2, Math.min(14, cam.dist * Math.exp(e.deltaY * 0.001))); }, { passive: false });
 
